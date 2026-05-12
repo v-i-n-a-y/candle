@@ -701,7 +701,7 @@ impl GnnScatterAdd<'_> {
         let d = src_dims[1];
         let dst_el = n_nodes * d;
         // SAFETY: zero-initialised below.
-        let out = dev.alloc_zeros::<T>(dst_el).w()?;
+        let out = dev.alloc_zeros::<T>(dst_el)?;
 
         let (idx_name, (idx_ptr, _guard)) = match &idx.slice {
             CudaStorageSlice::U32(slice) => ("gnn_sa_u32", slice_ptr(slice, idx_o1)),
@@ -1215,13 +1215,14 @@ impl Map2InPlace for BinaryInPlace<'_> {
             )
         };
         let func = dev.get_or_load_func(&kernel_name::<T>(self.0), &kernels::BINARY)?;
-        let dst_view = dst.slice_mut(dst_l.start_offset()..);
         let src_view = src.slice(src_l.start_offset()..);
         let mut builder = func.builder();
         barg!(builder, elem_count);
         barg!(builder, dims.len());
         dims_and_strides.builder_arg(&mut builder);
-        builder.arg(&dst_view);
+        // Pass mutable dst as a full slice — CudaViewMut doesn't implement DeviceRepr,
+        // so we pass the slice directly and the kernel reads start_offset from dims_and_strides.
+        builder.arg(dst);
         builder.arg(&src_view);
         // SAFETY: ffi
         unsafe { builder.launch(cfg) }.w()?;
