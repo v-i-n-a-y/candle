@@ -115,7 +115,7 @@ impl Map1 for Affine {
         let src = &src.slice(layout.start_offset()..);
         let func = dev.get_or_load_func(&kernel_name::<T>("affine"), &kernels::AFFINE)?;
         // SAFETY: Set later by running the kernel.
-        let out = unsafe { dev.alloc::<T>(el)? };
+        let out = unsafe { dev.alloc_async::<T>(el)? };
         let mut builder = func.builder();
         barg!(builder, el);
         barg!(builder, dims.len());
@@ -146,7 +146,7 @@ impl Map1 for Elu {
         let src = &src.slice(layout.start_offset()..);
         let func = dev.get_or_load_func(&kernel_name::<T>("uelu"), &kernels::UNARY)?;
         // SAFETY: Set later by running the kernel.
-        let out = unsafe { dev.alloc::<T>(el)? };
+        let out = unsafe { dev.alloc_async::<T>(el)? };
         let mut builder = func.builder();
         barg!(builder, el);
         barg!(builder, dims.len());
@@ -191,7 +191,7 @@ impl Map1 for Im2Col1D {
         let src = &src.slice(layout.start_offset()..);
         let func = dev.get_or_load_func(&kernel_name::<T>("im2col1d"), &kernels::CONV)?;
         // SAFETY: Set later by running the kernel.
-        let dst = unsafe { dev.alloc::<T>(threads * self.l_k)? };
+        let dst = unsafe { dev.alloc_async::<T>(threads * self.l_k)? };
         let mut builder = func.builder();
         barg!(builder, threads);
         barg!(builder, l_out);
@@ -242,7 +242,7 @@ impl Map1 for Im2Col {
         let src = &src.slice(layout.start_offset()..);
         let func = dev.get_or_load_func(&kernel_name::<T>("im2col"), &kernels::CONV)?;
         // SAFETY: Set later by running the kernel.
-        let dst = unsafe { dev.alloc::<T>(dst_el)? };
+        let dst = unsafe { dev.alloc_async::<T>(dst_el)? };
         let mut builder = func.builder();
         barg!(builder, dst_el);
         barg!(builder, h_out);
@@ -277,7 +277,7 @@ impl Map1 for Powf {
         let src = &src.slice(layout.start_offset()..);
         let func = dev.get_or_load_func(&kernel_name::<T>("upowf"), &kernels::UNARY)?;
         // SAFETY: Set later by running the kernel.
-        let out = unsafe { dev.alloc::<T>(el)? };
+        let out = unsafe { dev.alloc_async::<T>(el)? };
         let mut builder = func.builder();
         barg!(builder, el);
         barg!(builder, dims.len());
@@ -345,7 +345,7 @@ impl Map1Any for FastReduce<'_> {
         let func = dev.get_or_load_func(&kernel_name::<T>(name), &kernels::REDUCE)?;
         if return_index {
             // SAFETY: filled in by the follow up kernel.
-            let out = unsafe { dev.alloc::<u32>(dst_el)? };
+            let out = unsafe { dev.alloc_async::<u32>(dst_el)? };
             let mut builder = func.builder();
             barg!(builder, src_el);
             barg!(builder, el_to_sum_per_block);
@@ -358,7 +358,7 @@ impl Map1Any for FastReduce<'_> {
             Ok(S::U32(out))
         } else {
             // SAFETY: filled in by the follow up kernel.
-            let out = unsafe { dev.alloc::<T>(dst_el)? };
+            let out = unsafe { dev.alloc_async::<T>(dst_el)? };
             let mut builder = func.builder();
             barg!(builder, src_el);
             barg!(builder, el_to_sum_per_block);
@@ -388,7 +388,7 @@ impl<U: UnaryOpT> Map1 for U {
         let src = &src.slice(layout.start_offset()..);
         let func = dev.get_or_load_func(&kernel_name::<T>(U::KERNEL), &kernels::UNARY)?;
         // SAFETY: Set later by running the kernel.
-        let mut out = unsafe { dev.alloc::<T>(el_count)? };
+        let mut out = unsafe { dev.alloc_async::<T>(el_count)? };
         let mut builder = func.builder();
         barg!(builder, el_count);
         barg!(builder, dims.len());
@@ -442,7 +442,7 @@ impl Map1 for IndexSelect<'_> {
         let cfg = LaunchConfig::for_num_elems(dst_el as u32);
         let func = dev.get_or_load_func(&kernel_name::<T>(name), &kernels::INDEXING)?;
         // SAFETY: Set later by running the kernel.
-        let out = unsafe { dev.alloc::<T>(dst_el)? };
+        let out = unsafe { dev.alloc_async::<T>(dst_el)? };
         let mut builder = func.builder();
         barg!(builder, dst_el);
         barg!(builder, ids_dims.len());
@@ -497,7 +497,7 @@ impl Map1 for Gather<'_> {
         let ids_dim_sz = ids_l.dims()[dim];
         let func = dev.get_or_load_func(&kernel_name::<T>(name), &kernels::INDEXING)?;
         // SAFETY: Set later by running the kernel.
-        let out = unsafe { dev.alloc::<T>(el)? };
+        let out = unsafe { dev.alloc_async::<T>(el)? };
         let mut builder = func.builder();
         barg!(builder, el);
         barg!(builder, ids);
@@ -760,7 +760,7 @@ impl Map2 for Conv1D<'_> {
         let cfg = LaunchConfig::for_num_elems(dst_el as u32);
         let func = dev.get_or_load_func(&kernel_name::<T>("conv1d"), &kernels::CONV)?;
         // SAFETY: Set later by running the kernel.
-        let out = unsafe { dev.alloc::<T>(dst_el)? };
+        let out = unsafe { dev.alloc_async::<T>(dst_el)? };
         let ds = if dims.len() == 3 {
             [dims, inp_l.stride(), k_l.dims(), k_l.stride()].concat()
         } else if dims.len() == 2 {
@@ -803,7 +803,7 @@ impl Map2 for Conv2D<'_> {
         let el = shape.elem_count();
 
         // SAFETY: Set later by running the kernel.
-        let out = unsafe { dev.alloc::<T>(dst_el)? };
+        let out = unsafe { dev.alloc_async::<T>(dst_el)? };
         let cfg = LaunchConfig::for_num_elems(dst_el as u32);
         let func = dev.get_or_load_func(&kernel_name::<T>("conv2d"), &kernels::CONV)?;
         let ds = if dims.len() == 4 {
@@ -839,7 +839,7 @@ impl Map1 for Col2Im1D {
         let stride = self.stride;
         let l_out = (l_in - 1) * stride + k_size;
         let dst_el = b_size * c_out * l_out;
-        let mut im = unsafe { dev.alloc::<T>(dst_el)? };
+        let mut im = unsafe { dev.alloc_async::<T>(dst_el)? };
 
         let cfg = LaunchConfig::for_num_elems(dst_el as u32);
         let func = dev.get_or_load_func(&kernel_name::<T>("col2im1d"), &kernels::CONV)?;
@@ -874,7 +874,7 @@ impl Map2 for ConvTranspose1D<'_> {
         let el = shape.elem_count();
 
         // SAFETY: Set later by running the kernel.
-        let out = unsafe { dev.alloc::<T>(dst_el)? };
+        let out = unsafe { dev.alloc_async::<T>(dst_el)? };
         let cfg = LaunchConfig::for_num_elems(dst_el as u32);
         let func = dev.get_or_load_func(&kernel_name::<T>("conv_transpose1d"), &kernels::CONV)?;
         let ds = if dims.len() == 3 {
@@ -922,7 +922,7 @@ impl Map2 for ConvTranspose2D<'_> {
         let el = shape.elem_count();
 
         // SAFETY: Set later by running the kernel.
-        let out = unsafe { dev.alloc::<T>(dst_el)? };
+        let out = unsafe { dev.alloc_async::<T>(dst_el)? };
         let cfg = LaunchConfig::for_num_elems(dst_el as u32);
         let func = dev.get_or_load_func(&kernel_name::<T>("conv_transpose2d"), &kernels::CONV)?;
         let ds = if dims.len() == 4 {
@@ -989,7 +989,7 @@ impl Map1 for Pool2D {
         };
         let func = dev.get_or_load_func(&kernel_name::<T>(kname), &kernels::CONV)?;
         // SAFETY: Set later by running the kernel.
-        let out = unsafe { dev.alloc::<T>(dst_el)? };
+        let out = unsafe { dev.alloc_async::<T>(dst_el)? };
         let ds = dev.clone_htod(&ds)?;
         let mut builder = func.builder();
         barg!(builder, el);
@@ -1028,7 +1028,7 @@ impl Map1 for UpsampleNearest2D {
         let cfg = LaunchConfig::for_num_elems(dst_el as u32);
         let func = dev.get_or_load_func(&kernel_name::<T>("upsample_nearest2d"), &kernels::CONV)?;
         // SAFETY: Set later by running the kernel.
-        let out = unsafe { dev.alloc::<T>(dst_el)? };
+        let out = unsafe { dev.alloc_async::<T>(dst_el)? };
         let ds = dev.clone_htod(&ds)?;
         let scale_w = dims[2] as f64 / out_w as f64;
         let scale_h = dims[3] as f64 / out_h as f64;
@@ -1077,7 +1077,7 @@ impl Map1 for UpsampleBilinear2D {
             dev.get_or_load_func(&kernel_name::<T>("upsample_bilinear2d"), &kernels::CONV)?;
 
         // SAFETY: Set later by running the kernel.
-        let out = unsafe { dev.alloc::<T>(dst_el)? };
+        let out = unsafe { dev.alloc_async::<T>(dst_el)? };
         let ds = dev.clone_htod(&ds)?;
 
         let mut builder = func.builder();
@@ -1139,7 +1139,7 @@ impl Map2 for WhereCond<'_> {
         let f = &f.slice(layout_f.start_offset()..);
         let func = dev.get_or_load_func(&kernel_name::<T>(name), &kernels::TERNARY)?;
         // SAFETY: Set later by running the kernel.
-        let out = unsafe { dev.alloc::<T>(el)? };
+        let out = unsafe { dev.alloc_async::<T>(el)? };
         let mut builder = func.builder();
         barg!(builder, el);
         barg!(builder, dims.len());
@@ -1176,7 +1176,7 @@ impl<U: crate::op::BinaryOpT> Map2 for U {
         let rhs = &rhs.slice(rhs_l.start_offset()..);
         let func = dev.get_or_load_func(&kernel_name::<T>(U::KERNEL), &kernels::BINARY)?;
         // SAFETY: Set later by running the kernel.
-        let out = unsafe { dev.alloc::<T>(elem_count)? };
+        let out = unsafe { dev.alloc_async::<T>(elem_count)? };
         let mut builder = func.builder();
         barg!(builder, elem_count);
         barg!(builder, dims.len());
@@ -1257,7 +1257,7 @@ impl Map2 for FusedAddRelu {
         let rhs = &rhs.slice(rhs_l.start_offset()..);
         let func = dev.get_or_load_func(&kernel_name::<T>("fadd_relu"), &kernels::BINARY)?;
         // SAFETY: Set later by running the kernel.
-        let out = unsafe { dev.alloc::<T>(elem_count)? };
+        let out = unsafe { dev.alloc_async::<T>(elem_count)? };
         let mut builder = func.builder();
         barg!(builder, elem_count);
         barg!(builder, dims.len());
@@ -1302,7 +1302,7 @@ impl Map2Any for Cmp {
         };
         let func = dev.get_or_load_func(&kernel_name::<T>(name), &kernels::BINARY)?;
         // SAFETY: Set later by running the kernel.
-        let out = unsafe { dev.alloc::<u8>(elem_count)? };
+        let out = unsafe { dev.alloc_async::<u8>(elem_count)? };
         let mut builder = func.builder();
         barg!(builder, elem_count);
         barg!(builder, dims.len());
@@ -1713,7 +1713,7 @@ impl BackendStorage for CudaStorage {
         let func = dev.get_or_load_func(&kernel_name, &kernels::CAST)?;
         let slice = match dtype {
             DType::U8 => {
-                let out = unsafe { dev.alloc::<u8>(el)? };
+                let out = unsafe { dev.alloc_async::<u8>(el)? };
                 let mut builder = func.builder();
                 barg!(builder, el);
                 barg!(builder, dims.len());
@@ -1724,7 +1724,7 @@ impl BackendStorage for CudaStorage {
                 CudaStorageSlice::U8(out)
             }
             DType::U32 => {
-                let out = unsafe { dev.alloc::<u32>(el)? };
+                let out = unsafe { dev.alloc_async::<u32>(el)? };
                 let mut builder = func.builder();
                 barg!(builder, el);
                 barg!(builder, dims.len());
@@ -1735,7 +1735,7 @@ impl BackendStorage for CudaStorage {
                 CudaStorageSlice::U32(out)
             }
             DType::I64 => {
-                let out = unsafe { dev.alloc::<i64>(el)? };
+                let out = unsafe { dev.alloc_async::<i64>(el)? };
                 let mut builder = func.builder();
                 barg!(builder, el);
                 barg!(builder, dims.len());
@@ -1746,7 +1746,7 @@ impl BackendStorage for CudaStorage {
                 CudaStorageSlice::I64(out)
             }
             DType::BF16 => {
-                let out = unsafe { dev.alloc::<bf16>(el)? };
+                let out = unsafe { dev.alloc_async::<bf16>(el)? };
                 let mut builder = func.builder();
                 barg!(builder, el);
                 barg!(builder, dims.len());
@@ -1757,7 +1757,7 @@ impl BackendStorage for CudaStorage {
                 CudaStorageSlice::BF16(out)
             }
             DType::F16 => {
-                let out = unsafe { dev.alloc::<f16>(el)? };
+                let out = unsafe { dev.alloc_async::<f16>(el)? };
                 let mut builder = func.builder();
                 barg!(builder, el);
                 barg!(builder, dims.len());
@@ -1768,7 +1768,7 @@ impl BackendStorage for CudaStorage {
                 CudaStorageSlice::F16(out)
             }
             DType::F32 => {
-                let out = unsafe { dev.alloc::<f32>(el)? };
+                let out = unsafe { dev.alloc_async::<f32>(el)? };
                 let mut builder = func.builder();
                 barg!(builder, el);
                 barg!(builder, dims.len());
@@ -1779,7 +1779,7 @@ impl BackendStorage for CudaStorage {
                 CudaStorageSlice::F32(out)
             }
             DType::F64 => {
-                let out = unsafe { dev.alloc::<f64>(el)? };
+                let out = unsafe { dev.alloc_async::<f64>(el)? };
                 let mut builder = func.builder();
                 barg!(builder, el);
                 barg!(builder, dims.len());
@@ -1790,7 +1790,7 @@ impl BackendStorage for CudaStorage {
                 CudaStorageSlice::F64(out)
             }
             DType::F8E4M3 => {
-                let out = unsafe { dev.alloc::<float8::F8E4M3>(el)? };
+                let out = unsafe { dev.alloc_async::<float8::F8E4M3>(el)? };
                 let mut builder = func.builder();
                 barg!(builder, el);
                 barg!(builder, dims.len());
@@ -2410,7 +2410,7 @@ impl BackendStorage for CudaStorage {
                 let lhs = &lhs.slice(lhs_l.start_offset()..);
                 let rhs = &rhs.slice(rhs_l.start_offset()..);
                 let cfg = gemm_config(bf16::ONE, bf16::ZERO, (b, m, n, k), lhs_l, rhs_l)?;
-                let mut out = unsafe { dev.alloc::<bf16>(elem_count)? };
+                let mut out = unsafe { dev.alloc_async::<bf16>(elem_count)? };
                 unsafe { gemm_strided_batched_bf16(&self.device.blas, cfg, rhs, lhs, &mut out) }
                     .w()?;
                 CudaStorageSlice::BF16(out)
@@ -2419,7 +2419,7 @@ impl BackendStorage for CudaStorage {
                 let lhs = &lhs.slice(lhs_l.start_offset()..);
                 let rhs = &rhs.slice(rhs_l.start_offset()..);
                 let cfg = gemm_config(f16::ONE, f16::ZERO, (b, m, n, k), lhs_l, rhs_l)?;
-                let mut out = unsafe { dev.alloc::<f16>(elem_count)? };
+                let mut out = unsafe { dev.alloc_async::<f16>(elem_count)? };
                 unsafe { gemm_strided_batched_f16(&self.device.blas, cfg, rhs, lhs, &mut out) }
                     .w()?;
                 CudaStorageSlice::F16(out)
@@ -2428,7 +2428,7 @@ impl BackendStorage for CudaStorage {
                 let lhs = &lhs.slice(lhs_l.start_offset()..);
                 let rhs = &rhs.slice(rhs_l.start_offset()..);
                 let cfg = gemm_config(1., 0., (b, m, n, k), lhs_l, rhs_l)?;
-                let mut out = unsafe { dev.alloc::<f32>(elem_count)? };
+                let mut out = unsafe { dev.alloc_async::<f32>(elem_count)? };
                 unsafe { gemm_strided_batched_f32(&self.device.blas, cfg, rhs, lhs, &mut out) }
                     .w()?;
                 CudaStorageSlice::F32(out)
@@ -2437,7 +2437,7 @@ impl BackendStorage for CudaStorage {
                 let lhs = &lhs.slice(lhs_l.start_offset()..);
                 let rhs = &rhs.slice(rhs_l.start_offset()..);
                 let cfg = gemm_config(1., 0., (b, m, n, k), lhs_l, rhs_l)?;
-                let mut out = unsafe { dev.alloc::<f64>(elem_count)? };
+                let mut out = unsafe { dev.alloc_async::<f64>(elem_count)? };
                 unsafe {
                     self.device
                         .blas
