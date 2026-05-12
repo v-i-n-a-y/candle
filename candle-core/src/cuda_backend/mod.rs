@@ -1578,6 +1578,29 @@ fn gemm_config<T>(
     })
 }
 
+impl CudaStorage {
+    pub(crate) fn binary_inplace(
+        &mut self,
+        op: &'static str,
+        rhs: &Self,
+        lhs_l: &Layout,
+        rhs_l: &Layout,
+    ) -> Result<()> {
+        BinaryInPlace(op).map(&mut self.slice, lhs_l, &rhs.slice, rhs_l, &self.device)
+    }
+
+    pub(crate) fn fused_add_relu(
+        &self,
+        rhs: &Self,
+        lhs_l: &Layout,
+        rhs_l: &Layout,
+    ) -> Result<Self> {
+        let device = self.device().clone();
+        let slice = FusedAddRelu.map(&self.slice, lhs_l, &rhs.slice, rhs_l, &device)?;
+        Ok(Self { slice, device })
+    }
+}
+
 impl BackendStorage for CudaStorage {
     type Device = CudaDevice;
 
@@ -1794,27 +1817,6 @@ impl BackendStorage for CudaStorage {
     fn affine(&self, layout: &Layout, mul: f64, add: f64) -> Result<Self> {
         let device = self.device().clone();
         let slice = Affine(mul, add).map(&self.slice, &device, layout)?;
-        Ok(Self { slice, device })
-    }
-
-    pub(crate) fn binary_inplace(
-        &mut self,
-        op: &'static str,
-        rhs: &Self,
-        lhs_l: &Layout,
-        rhs_l: &Layout,
-    ) -> Result<()> {
-        BinaryInPlace(op).map(&mut self.slice, lhs_l, &rhs.slice, rhs_l, &self.device)
-    }
-
-    pub(crate) fn fused_add_relu(
-        &self,
-        rhs: &Self,
-        lhs_l: &Layout,
-        rhs_l: &Layout,
-    ) -> Result<Self> {
-        let device = self.device().clone();
-        let slice = FusedAddRelu.map(&self.slice, lhs_l, &rhs.slice, rhs_l, &device)?;
         Ok(Self { slice, device })
     }
 
