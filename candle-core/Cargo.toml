@@ -49,6 +49,7 @@ default = []
 cuda = ["cudarc", "dep:candle-kernels", "candle-ug?/cuda"]
 cudnn = ["cuda", "cudarc/cudnn"]
 nccl = ["cuda", "cudarc/nccl"]
+cusparse = ["cuda", "cudarc/cusparse"]
 mkl = ["dep:libc", "dep:intel-mkl-src"]
 accelerate = ["dep:libc", "dep:accelerate-src"]
 metal = [
