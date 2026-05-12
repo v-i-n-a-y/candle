@@ -1930,12 +1930,10 @@ impl Tensor {
                 }
             };
             let out_shape = _x.shape().clone();
-            return Ok(from_storage(
-                Storage::Cuda(out_cuda),
-                out_shape,
-                BackpropOp::none(),
-                false,
-            ));
+            let op = BackpropOp::new3(_x, _weight, _bias, |x, w, b| {
+                crate::op::Op::LayerNormFused(x, w, b, _eps)
+            });
+            return Ok(from_storage(Storage::Cuda(out_cuda), out_shape, op, false));
         }
         crate::bail!("layer_norm_fused: requires CUDA feature")
     }

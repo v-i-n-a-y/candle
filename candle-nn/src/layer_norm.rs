@@ -115,9 +115,23 @@ impl LayerNorm {
 
 impl Module for LayerNorm {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        // Note: layer_norm_fused kernel exists (Tensor::layer_norm_fused) but uses
-        // BackpropOp::none() — do not call it here as it blocks GNN layer gradients.
-        // Use it explicitly during inference/rollout only.
+        // Fast path: fused single-pass Welford kernel with correct backward.
+        // The backward is implemented via Op::LayerNormFused in backprop.rs.
+        #[cfg(feature = "cuda")]
+        if x.is_contiguous() && self.remove_mean {
+            if let Some(bias) = &self.bias {
+                if matches!(x.device(), candle_core::Device::Cuda(_))
+                    && matches!(x.dtype(), DType::F32 | DType::F16 | DType::BF16)
+                {
+                    return candle_core::Tensor::layer_norm_fused(
+                        x,
+                        &self.weight,
+                        bias,
+                        self.eps as f32,
+                    );
+                }
+            }
+        }
         if x.is_contiguous() && self.remove_mean {
             if let Some(bias) = self.bias.as_ref() {
                 return crate::ops::layer_norm(x, &self.weight, bias, self.eps as f32);

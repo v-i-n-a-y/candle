@@ -56,7 +56,8 @@ impl Tensor {
                     | Op::Scatter(t1, t2, t3, _)
                     | Op::ScatterAdd(t1, t2, t3, _)
                     | Op::CustomOp3(t1, t2, t3, _)
-                    | Op::WhereCond(t1, t2, t3) => {
+                    | Op::WhereCond(t1, t2, t3)
+                    | Op::LayerNormFused(t1, t2, t3, _) => {
                         let (tg, nodes) = walk(t1, nodes, already_seen);
                         track_grad |= tg;
                         let (tg, nodes) = walk(t2, nodes, already_seen);
@@ -234,6 +235,35 @@ impl Tensor {
                         let f_sum_grad = grads.or_insert(f)?;
                         let f_grad = pred.where_cond(&zeros, &grad)?;
                         *f_sum_grad = f_sum_grad.add(&f_grad)?;
+                    }
+                    Op::LayerNormFused(x, weight, bias, eps) => {
+                        // Recompute normalisation statistics from the stored x.
+                        // x: [N, D],  weight/bias: [D],  grad: [N, D]
+                        let eps_f64 = *eps as f64;
+                        let mean_x = x.mean_keepdim(x.rank() - 1)?;
+                        let x_centered = x.broadcast_sub(&mean_x)?;
+                        let var_x = x_centered.sqr()?.mean_keepdim(x.rank() - 1)?;
+                        let std_x = (var_x + eps_f64)?.sqrt()?;          // [N, 1]
+                        let x_hat = x_centered.broadcast_div(&std_x)?;   // [N, D]
+
+                        // grad_bias = sum_rows(grad) → [D]
+                        let b_sum_grad = grads.or_insert(bias)?;
+                        *b_sum_grad = b_sum_grad.add(&grad.sum(0)?)?;
+
+                        // grad_weight = sum_rows(grad * x_hat) → [D]
+                        let w_sum_grad = grads.or_insert(weight)?;
+                        *w_sum_grad = w_sum_grad.add(&((&grad * &x_hat)?.sum(0)?))?;
+
+                        // grad_x = (1/std) * (ĝ − mean_d(ĝ) − x_hat * mean_d(ĝ * x_hat))
+                        // where ĝ = grad * weight  (broadcast weight [D] → [N, D])
+                        let g_hat = grad.broadcast_mul(weight)?;
+                        let mean_g = g_hat.mean_keepdim(x.rank() - 1)?;
+                        let mean_g_xhat = (&g_hat * &x_hat)?.mean_keepdim(x.rank() - 1)?;
+                        let grad_x = g_hat.broadcast_sub(&mean_g)?
+                            .sub(&x_hat.broadcast_mul(&mean_g_xhat)?)?
+                            .broadcast_div(&std_x)?;
+                        let x_sum_grad = grads.or_insert(x)?;
+                        *x_sum_grad = x_sum_grad.add(&grad_x)?;
                     }
                     Op::Conv1D {
                         arg,

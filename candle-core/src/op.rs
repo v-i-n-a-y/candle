@@ -87,6 +87,8 @@ pub enum Op {
     IndexAdd(Tensor, Tensor, Tensor, usize),
     // (index, src, n_nodes) — index is 1-D [E], src is 2-D [E, D], output is [n_nodes, D]
     GnnScatterAdd(Tensor, Tensor, usize),
+    // (x, weight, bias, eps) — fused single-pass LayerNorm forward; backward recomputes stats.
+    LayerNormFused(Tensor, Tensor, Tensor, f32),
     WhereCond(Tensor, Tensor, Tensor),
 
     #[allow(dead_code)]
