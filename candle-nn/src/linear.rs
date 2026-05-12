@@ -39,8 +39,8 @@ impl Linear {
     }
 }
 
-impl super::Module for Linear {
-    fn forward(&self, x: &Tensor) -> candle::Result<Tensor> {
+impl Linear {
+    fn matmul_and_bias(&self, x: &Tensor) -> candle::Result<Tensor> {
         // When possible, we avoid using a broadcasted matmul as it is much slower
         // than the standard matmul for the cuda and cpu backends.
         let x = match *x.dims() {
@@ -75,6 +75,57 @@ impl super::Module for Linear {
             None => Ok(x),
             Some(bias) => x.broadcast_add(bias),
         }
+    }
+
+    /// Fused linear + ReLU activation.
+    ///
+    /// Equivalent to `relu(x @ W.T + b)` but, when a bias is present, uses a
+    /// single fused `add_relu` kernel for the bias-add and activation step,
+    /// saving one intermediate allocation on CUDA.
+    ///
+    /// When there is no bias the result is the same as `self.forward(xs)?.relu()`.
+    pub fn forward_relu(&self, xs: &Tensor) -> candle::Result<Tensor> {
+        let y = match *xs.dims() {
+            [b1, b2, m, k] => {
+                if xs.is_contiguous() {
+                    let w = self.weight.t()?;
+                    xs.reshape((b1 * b2 * m, k))?
+                        .matmul(&w)?
+                        .reshape((b1, b2, m, ()))?
+                } else {
+                    let w = self.weight.broadcast_left((b1, b2))?.t()?;
+                    xs.matmul(&w)?
+                }
+            }
+            [bsize, m, k] => {
+                if xs.is_contiguous() {
+                    let w = self.weight.t()?;
+                    xs.reshape((bsize * m, k))?
+                        .matmul(&w)?
+                        .reshape((bsize, m, ()))?
+                } else {
+                    let w = self.weight.broadcast_left(bsize)?.t()?;
+                    xs.matmul(&w)?
+                }
+            }
+            _ => {
+                let w = self.weight.t()?;
+                xs.matmul(&w)?
+            }
+        };
+        match &self.bias {
+            None => y.relu(),
+            Some(bias) => {
+                let bias_broadcast = bias.broadcast_as(y.shape())?;
+                y.add_relu(&bias_broadcast)
+            }
+        }
+    }
+}
+
+impl super::Module for Linear {
+    fn forward(&self, x: &Tensor) -> candle::Result<Tensor> {
+        self.matmul_and_bias(x)
     }
 }
 

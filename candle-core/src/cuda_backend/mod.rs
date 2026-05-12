@@ -1214,8 +1214,7 @@ impl Map2InPlace for BinaryInPlace<'_> {
                 dev.clone_htod(&[dims, dst_l.stride(), src_l.stride()].concat())?,
             )
         };
-        let func =
-            dev.get_or_load_func(&kernel_name::<T>(self.0), &kernels::BINARY)?;
+        let func = dev.get_or_load_func(&kernel_name::<T>(self.0), &kernels::BINARY)?;
         let dst_view = dst.slice_mut(dst_l.start_offset()..);
         let src_view = src.slice(src_l.start_offset()..);
         let mut builder = func.builder();
