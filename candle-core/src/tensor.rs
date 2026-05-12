@@ -1882,12 +1882,10 @@ impl Tensor {
             n_nodes,
         )?;
         let out_shape = crate::Shape::from_dims(&[n_nodes, d]);
-        Ok(from_storage(
-            storage,
-            out_shape,
-            crate::op::BackpropOp::none(),
-            false,
-        ))
+        let op = crate::op::BackpropOp::new2(self, index, |s, i| {
+            crate::op::Op::GnnScatterAdd(i, s, n_nodes)
+        });
+        Ok(from_storage(storage, out_shape, op, false))
     }
 
     /// Gather values across the target dimension.

@@ -85,6 +85,8 @@ pub enum Op {
     ScatterAdd(Tensor, Tensor, Tensor, usize),
     IndexSelect(Tensor, Tensor, usize),
     IndexAdd(Tensor, Tensor, Tensor, usize),
+    // (index, src, n_nodes) — index is 1-D [E], src is 2-D [E, D], output is [n_nodes, D]
+    GnnScatterAdd(Tensor, Tensor, usize),
     WhereCond(Tensor, Tensor, Tensor),
 
     #[allow(dead_code)]

@@ -85,6 +85,7 @@ impl Tensor {
                         kernel: rhs,
                         ..
                     }
+                    | Op::GnnScatterAdd(lhs, rhs, _)
                     | Op::CustomOp2(lhs, rhs, _)
                     | Op::Binary(lhs, rhs, _)
                     | Op::Gather(lhs, rhs, _)
@@ -449,6 +450,14 @@ impl Tensor {
                         let src_grad = grad.index_select(indexes, *dim)?;
                         let src_sum_grad = grads.or_insert(src)?;
                         *src_sum_grad = src_sum_grad.add(&src_grad)?;
+                    }
+                    Op::GnnScatterAdd(index, src, _n_nodes) => {
+                        // grad_src[e, d] = grad_out[index[e], d]
+                        // i.e. gather rows of grad_out at positions given by index
+                        let grad_src = grad.index_select(index, 0)?;
+                        let src_sum_grad = grads.or_insert(src)?;
+                        *src_sum_grad = src_sum_grad.add(&grad_src)?;
+                        // index is integer — no gradient
                     }
                     Op::IndexSelect(arg, indexes, dim) => {
                         let sum_grad = grads.or_insert(arg)?;
