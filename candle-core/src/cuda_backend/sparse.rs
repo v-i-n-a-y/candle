@@ -36,7 +36,7 @@
 use std::mem::MaybeUninit;
 
 use cudarc::cusparse::sys as sp;
-use cudarc::driver::{CudaSlice, DevicePtr, DevicePtrMut};
+use cudarc::driver::{CudaSlice, DevicePtr, DevicePtrMut, DeviceSlice};
 
 use crate::cuda_backend::{CudaDevice, CudaStorage, CudaStorageSlice, WrapErr};
 use crate::{Layout, Result};
@@ -414,35 +414,146 @@ impl CsrMatrix {
 /// `#[cfg(feature = "cusparse")] pub mod sparse;` guard in
 /// `candle-core/src/cuda_backend/mod.rs`.
 unsafe fn spmm_f32_raw(
-    _row_ptr: &CudaSlice<i32>,
-    _col_idx: &CudaSlice<i32>,
-    _values: &CudaSlice<f32>,
-    _n_rows: i64,
-    _n_cols: i64,
-    _nnz: i64,
-    _feat: &cudarc::driver::CudaView<'_, f32>,
-    _out: &mut CudaSlice<f32>,
-    _d: i64,
+    row_ptr: &CudaSlice<i32>,
+    col_idx: &CudaSlice<i32>,
+    values: &CudaSlice<f32>,
+    n_rows: i64,
+    n_cols: i64,
+    nnz: i64,
+    feat: &cudarc::driver::CudaView<'_, f32>,
+    out: &mut CudaSlice<f32>,
+    d: i64,
 ) -> Result<()> {
-    // TODO: replace with the cuSPARSE FFI sequence documented above.
-    //
-    // Blocked by: `cusparse` feature not yet enabled in the workspace Cargo.toml
-    // (add `"cusparse"` to the cudarc features list).  Once enabled, import:
-    //   use cudarc::cusparse::sys as sp;
-    //   use std::ffi::c_void;
-    // and implement the 8-step sequence from the doc-comment.
-    //
-    // Until then, fall back to a host-side reference implementation that
-    // exercises the same code path so the rest of the pipeline compiles and
-    // the Tensor API is testable on CPU.
-    Err(crate::Error::Msg(
-        "CsrMatrix::spmm: cuSPARSE FFI not yet wired — \
-         build with the `cusparse` feature enabled in cudarc and implement \
-         spmm_f32_raw; see the TODO doc-comment in sparse.rs for the full \
-         call sequence"
-            .to_string(),
+    use std::ffi::c_void;
+
+    let stream = row_ptr.stream();
+
+    // 1. Create cuSPARSE handle.
+    let mut handle = MaybeUninit::uninit();
+    sp::cusparseCreate(handle.as_mut_ptr())
+        .result()
+        .map_err(|e| crate::Error::Msg(format!("cusparseCreate: {:?}", e)).bt())?;
+    let handle = handle.assume_init();
+
+    // 2. Create sparse CSR matrix descriptor for A.
+    let (rp_ptr, _rp_guard) = row_ptr.device_ptr(stream);
+    let (ci_ptr, _ci_guard) = col_idx.device_ptr(stream);
+    let (val_ptr, _val_guard) = values.device_ptr(stream);
+    let mut mat_a = MaybeUninit::uninit();
+    sp::cusparseCreateCsr(
+        mat_a.as_mut_ptr(),
+        n_rows,
+        n_cols,
+        nnz,
+        rp_ptr as *mut c_void,
+        ci_ptr as *mut c_void,
+        val_ptr as *mut c_void,
+        sp::cusparseIndexType_t::CUSPARSE_INDEX_32I,
+        sp::cusparseIndexType_t::CUSPARSE_INDEX_32I,
+        sp::cusparseIndexBase_t::CUSPARSE_INDEX_BASE_ZERO,
+        sp::cudaDataType::CUDA_R_32F,
     )
-    .bt())
+    .result()
+    .map_err(|e| crate::Error::Msg(format!("cusparseCreateCsr: {:?}", e)).bt())?;
+    let mat_a = mat_a.assume_init();
+
+    // 3. Dense matrix B = feat [n_cols, D] row-major.
+    let (feat_ptr, _feat_guard) = feat.device_ptr(stream);
+    let mut mat_b = MaybeUninit::uninit();
+    sp::cusparseCreateDnMat(
+        mat_b.as_mut_ptr(),
+        n_cols,
+        d,
+        d,
+        feat_ptr as *mut c_void,
+        sp::cudaDataType::CUDA_R_32F,
+        sp::cusparseOrder_t::CUSPARSE_ORDER_ROW,
+    )
+    .result()
+    .map_err(|e| crate::Error::Msg(format!("cusparseCreateDnMat(B): {:?}", e)).bt())?;
+    let mat_b = mat_b.assume_init();
+
+    // 4. Dense matrix C = out [n_rows, D] row-major.
+    let (out_ptr, _out_guard) = out.device_ptr_mut(stream);
+    let mut mat_c = MaybeUninit::uninit();
+    sp::cusparseCreateDnMat(
+        mat_c.as_mut_ptr(),
+        n_rows,
+        d,
+        d,
+        out_ptr as *mut c_void,
+        sp::cudaDataType::CUDA_R_32F,
+        sp::cusparseOrder_t::CUSPARSE_ORDER_ROW,
+    )
+    .result()
+    .map_err(|e| crate::Error::Msg(format!("cusparseCreateDnMat(C): {:?}", e)).bt())?;
+    let mat_c = mat_c.assume_init();
+
+    // 5. Query workspace size.
+    let alpha = 1.0f32;
+    let beta = 0.0f32;
+    let mut buf_sz: usize = 0;
+    sp::cusparseSpMM_bufferSize(
+        handle,
+        sp::cusparseOperation_t::CUSPARSE_OPERATION_NON_TRANSPOSE,
+        sp::cusparseOperation_t::CUSPARSE_OPERATION_NON_TRANSPOSE,
+        &alpha as *const f32 as *const c_void,
+        mat_a,
+        mat_b,
+        &beta as *const f32 as *const c_void,
+        mat_c,
+        sp::cudaDataType::CUDA_R_32F,
+        sp::cusparseSpMMAlg_t::CUSPARSE_SPMM_CSR_ALG1,
+        &mut buf_sz,
+    )
+    .result()
+    .map_err(|e| crate::Error::Msg(format!("cusparseSpMM_bufferSize: {:?}", e)).bt())?;
+
+    // 6. Allocate workspace (stream-ordered).
+    // We need to allocate on the same device as the other buffers. Use cudarc driver directly.
+    let work_buf: CudaSlice<u8> = {
+        let len = buf_sz.max(1);
+        // alloc_async is not available here without CudaDevice; use cuMemAlloc_v2 via
+        // a fresh alloc on the same stream.
+        // row_ptr.stream() gives us a &CudaStream; we can allocate via stream.alloc::<u8>
+        row_ptr.stream().alloc::<u8>(len).map_err(|e| {
+            crate::Error::Msg(format!("workspace alloc: {:?}", e)).bt()
+        })?
+    };
+    let (work_ptr, _work_guard) = work_buf.device_ptr(stream);
+
+    // 7. Execute SpMM.
+    sp::cusparseSpMM(
+        handle,
+        sp::cusparseOperation_t::CUSPARSE_OPERATION_NON_TRANSPOSE,
+        sp::cusparseOperation_t::CUSPARSE_OPERATION_NON_TRANSPOSE,
+        &alpha as *const f32 as *const c_void,
+        mat_a,
+        mat_b,
+        &beta as *const f32 as *const c_void,
+        mat_c,
+        sp::cudaDataType::CUDA_R_32F,
+        sp::cusparseSpMMAlg_t::CUSPARSE_SPMM_CSR_ALG1,
+        work_ptr as *mut c_void,
+    )
+    .result()
+    .map_err(|e| crate::Error::Msg(format!("cusparseSpMM: {:?}", e)).bt())?;
+
+    // 8. Teardown descriptors and handle.
+    sp::cusparseDestroySpMat(mat_a)
+        .result()
+        .map_err(|e| crate::Error::Msg(format!("cusparseDestroySpMat: {:?}", e)).bt())?;
+    sp::cusparseDestroyDnMat(mat_b)
+        .result()
+        .map_err(|e| crate::Error::Msg(format!("cusparseDestroyDnMat(B): {:?}", e)).bt())?;
+    sp::cusparseDestroyDnMat(mat_c)
+        .result()
+        .map_err(|e| crate::Error::Msg(format!("cusparseDestroyDnMat(C): {:?}", e)).bt())?;
+    sp::cusparseDestroy(handle)
+        .result()
+        .map_err(|e| crate::Error::Msg(format!("cusparseDestroy: {:?}", e)).bt())?;
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
