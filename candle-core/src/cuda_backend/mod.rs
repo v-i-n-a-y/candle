@@ -671,6 +671,72 @@ impl Map2InPlace for ScatterAdd<'_> {
     }
 }
 
+// GNN edge-parallel scatter_add.
+// src: [E, D], idx: [E] (integer), out: [N, D]
+// Grid: 2-D over (E, D) so every (edge, feature) pair is one thread.
+struct GnnScatterAdd<'a>(&'a CudaStorage, &'a Layout);
+impl GnnScatterAdd<'_> {
+    fn f<T: DeviceRepr + WithDType + ValidAsZeroBits>(
+        &self,
+        src: &CudaSlice<T>,
+        src_l: &Layout,
+        dev: &CudaDevice,
+        n_nodes: usize,
+    ) -> Result<CudaSlice<T>> {
+        let idx = &self.0;
+        let idx_l = &self.1;
+        let (idx_o1, _) = match idx_l.contiguous_offsets() {
+            Some(o12) => o12,
+            None => Err(crate::Error::RequiresContiguous { op: "gnn-scatter-add" }.bt())?,
+        };
+        let src = match src_l.contiguous_offsets() {
+            Some((o1, o2)) => src.slice(o1..o2),
+            None => Err(crate::Error::RequiresContiguous { op: "gnn-scatter-add" }.bt())?,
+        };
+        let src_dims = src_l.dims();
+        if src_dims.len() != 2 {
+            crate::bail!("gnn-scatter-add: src must be 2-D [E, D], got {:?}", src_dims);
+        }
+        let e = src_dims[0];
+        let d = src_dims[1];
+        let dst_el = n_nodes * d;
+        // SAFETY: zero-initialised below.
+        let out = dev.alloc_zeros::<T>(dst_el).w()?;
+
+        let (idx_name, (idx_ptr, _guard)) = match &idx.slice {
+            CudaStorageSlice::U32(slice) => ("gnn_sa_u32", slice_ptr(slice, idx_o1)),
+            CudaStorageSlice::I64(slice) => ("gnn_sa_i64", slice_ptr(slice, idx_o1)),
+            CudaStorageSlice::I32(slice) => ("gnn_sa_i32", slice_ptr(slice, idx_o1)),
+            _ => Err(CudaError::UnexpectedDType {
+                msg: "gnn-scatter-add index should be u32/i32/i64",
+                expected: DType::I64,
+                got: idx.dtype(),
+            })?,
+        };
+        let kname = kernel_name::<T>(idx_name);
+        let func = dev.get_or_load_func(&kname, &kernels::INDEXING)?;
+
+        // 2-D grid: x over edges, y over feature dims.
+        const BX: u32 = 256;
+        const BY: u32 = 1;
+        let grid_x = e.div_ceil(BX as usize) as u32;
+        let grid_y = d.div_ceil(BY as usize) as u32;
+        let cfg = LaunchConfig {
+            grid_dim: (grid_x, grid_y, 1),
+            block_dim: (BX, BY, 1),
+            shared_mem_bytes: 0,
+        };
+        let mut builder = func.builder();
+        barg!(builder, e, n_nodes, d);
+        builder.arg(&src);
+        barg!(builder, idx_ptr);
+        builder.arg(&out);
+        // SAFETY: ffi.
+        unsafe { builder.launch(cfg) }.w()?;
+        Ok(out)
+    }
+}
+
 struct Conv1D<'a>(&'a crate::conv::ParamsConv1D);
 impl Map2 for Conv1D<'_> {
     fn f<T: DeviceRepr + WithDType + ValidAsZeroBits>(
@@ -1109,6 +1175,87 @@ impl<U: crate::op::BinaryOpT> Map2 for U {
         let lhs = &lhs.slice(lhs_l.start_offset()..);
         let rhs = &rhs.slice(rhs_l.start_offset()..);
         let func = dev.get_or_load_func(&kernel_name::<T>(U::KERNEL), &kernels::BINARY)?;
+        // SAFETY: Set later by running the kernel.
+        let out = unsafe { dev.alloc::<T>(elem_count)? };
+        let mut builder = func.builder();
+        barg!(builder, elem_count);
+        barg!(builder, dims.len());
+        dims_and_strides.builder_arg(&mut builder);
+        builder.arg(lhs);
+        builder.arg(rhs);
+        builder.arg(&out);
+        // SAFETY: ffi
+        unsafe { builder.launch(cfg) }.w()?;
+        Ok(out)
+    }
+}
+
+/// CUDA in-place binary op: dispatches `iadd`, `isub`, or `imul` kernels.
+/// The kernel name prefix is stored in the struct (e.g. "iadd", "isub", "imul").
+struct BinaryInPlace<'a>(&'a str);
+
+impl Map2InPlace for BinaryInPlace<'_> {
+    fn f<T: DeviceRepr + WithDType + ValidAsZeroBits>(
+        &self,
+        dst: &mut CudaSlice<T>,
+        dst_l: &Layout,
+        src: &CudaSlice<T>,
+        src_l: &Layout,
+        dev: &CudaDevice,
+    ) -> Result<()> {
+        let shape = dst_l.shape();
+        let dims = shape.dims();
+        let elem_count = shape.elem_count();
+        let cfg = LaunchConfig::for_num_elems(elem_count as u32);
+        let dims_and_strides = if dst_l.is_contiguous() && src_l.is_contiguous() {
+            SlicePtrOrNull::Null
+        } else {
+            SlicePtrOrNull::Ptr(
+                dev.clone_htod(&[dims, dst_l.stride(), src_l.stride()].concat())?,
+            )
+        };
+        let func =
+            dev.get_or_load_func(&kernel_name::<T>(self.0), &kernels::BINARY)?;
+        let dst_view = dst.slice_mut(dst_l.start_offset()..);
+        let src_view = src.slice(src_l.start_offset()..);
+        let mut builder = func.builder();
+        barg!(builder, elem_count);
+        barg!(builder, dims.len());
+        dims_and_strides.builder_arg(&mut builder);
+        builder.arg(&dst_view);
+        builder.arg(&src_view);
+        // SAFETY: ffi
+        unsafe { builder.launch(cfg) }.w()?;
+        Ok(())
+    }
+}
+
+/// CUDA fused add+relu kernel dispatcher.
+struct FusedAddRelu;
+
+impl Map2 for FusedAddRelu {
+    fn f<T: DeviceRepr + WithDType + ValidAsZeroBits>(
+        &self,
+        lhs: &CudaSlice<T>,
+        lhs_l: &Layout,
+        rhs: &CudaSlice<T>,
+        rhs_l: &Layout,
+        dev: &CudaDevice,
+    ) -> Result<CudaSlice<T>> {
+        let shape = lhs_l.shape();
+        let dims = shape.dims();
+        let elem_count = shape.elem_count();
+        let cfg = LaunchConfig::for_num_elems(elem_count as u32);
+        let dims_and_strides = if lhs_l.is_contiguous() && rhs_l.is_contiguous() {
+            SlicePtrOrNull::Null
+        } else {
+            SlicePtrOrNull::Ptr(
+                dev.clone_htod(&[dims, lhs_l.stride(), rhs_l.stride()].concat())?,
+            )
+        };
+        let lhs = &lhs.slice(lhs_l.start_offset()..);
+        let rhs = &rhs.slice(rhs_l.start_offset()..);
+        let func = dev.get_or_load_func(&kernel_name::<T>("fadd_relu"), &kernels::BINARY)?;
         // SAFETY: Set later by running the kernel.
         let out = unsafe { dev.alloc::<T>(elem_count)? };
         let mut builder = func.builder();
@@ -1651,6 +1798,27 @@ impl BackendStorage for CudaStorage {
         Ok(Self { slice, device })
     }
 
+    pub(crate) fn binary_inplace(
+        &mut self,
+        op: &'static str,
+        rhs: &Self,
+        lhs_l: &Layout,
+        rhs_l: &Layout,
+    ) -> Result<()> {
+        BinaryInPlace(op).map(&mut self.slice, lhs_l, &rhs.slice, rhs_l, &self.device)
+    }
+
+    pub(crate) fn fused_add_relu(
+        &self,
+        rhs: &Self,
+        lhs_l: &Layout,
+        rhs_l: &Layout,
+    ) -> Result<Self> {
+        let device = self.device().clone();
+        let slice = FusedAddRelu.map(&self.slice, lhs_l, &rhs.slice, rhs_l, &device)?;
+        Ok(Self { slice, device })
+    }
+
     fn powf(&self, layout: &Layout, e: f64) -> Result<Self> {
         let device = self.device().clone();
         let slice = Powf(e).map(&self.slice, &device, layout)?;
@@ -2183,6 +2351,47 @@ impl BackendStorage for CudaStorage {
         self.copy_strided_src(&mut acc, 0, l)?;
         IndexAdd(ids, ids_l, dim).map(&mut acc.slice, l, &src.slice, src_l, &device)?;
         Ok(acc)
+    }
+
+    fn gnn_scatter_add(
+        &self,
+        src_l: &Layout,
+        idx: &Self,
+        idx_l: &Layout,
+        n_nodes: usize,
+    ) -> Result<Self> {
+        let device = self.device().clone();
+        let src_dims = src_l.dims();
+        if src_dims.len() != 2 {
+            crate::bail!(
+                "gnn-scatter-add: src must be 2-D [E, D], got {:?}",
+                src_dims
+            );
+        }
+        let d = src_dims[1];
+        let out_shape = crate::Shape::from_dims(&[n_nodes, d]);
+        let slice = match &self.slice {
+            CudaStorageSlice::BF16(src) => {
+                CudaStorageSlice::BF16(GnnScatterAdd(idx, idx_l).f(src, src_l, &device, n_nodes)?)
+            }
+            CudaStorageSlice::F16(src) => {
+                CudaStorageSlice::F16(GnnScatterAdd(idx, idx_l).f(src, src_l, &device, n_nodes)?)
+            }
+            CudaStorageSlice::F32(src) => {
+                CudaStorageSlice::F32(GnnScatterAdd(idx, idx_l).f(src, src_l, &device, n_nodes)?)
+            }
+            CudaStorageSlice::F64(src) => {
+                CudaStorageSlice::F64(GnnScatterAdd(idx, idx_l).f(src, src_l, &device, n_nodes)?)
+            }
+            _ => crate::bail!(
+                "gnn-scatter-add: unsupported dtype {:?}, use f16/bf16/f32/f64",
+                self.dtype()
+            ),
+        };
+        Ok(Self {
+            slice,
+            device: device.clone(),
+        })
     }
 
     fn matmul(

@@ -163,6 +163,16 @@ impl crate::backend::BackendStorage for CudaStorage {
         Err(Error::NotCompiledWithCudaSupport)
     }
 
+    fn gnn_scatter_add(
+        &self,
+        _: &Layout,
+        _: &Self,
+        _: &Layout,
+        _: usize,
+    ) -> Result<Self> {
+        Err(Error::NotCompiledWithCudaSupport)
+    }
+
     fn index_add(
         &self,
         _: &Layout,

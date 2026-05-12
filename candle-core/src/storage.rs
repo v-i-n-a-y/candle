@@ -736,6 +736,28 @@ impl Storage {
         }
     }
 
+    pub(crate) fn gnn_scatter_add(
+        &self,
+        src_l: &Layout,
+        idx: &Self,
+        idx_l: &Layout,
+        n_nodes: usize,
+    ) -> Result<Self> {
+        self.same_device(idx, "gnn-scatter-add")?;
+        match (self, idx) {
+            (Self::Cpu(s), Self::Cpu(idx)) => {
+                Ok(Self::Cpu(s.gnn_scatter_add(src_l, idx, idx_l, n_nodes)?))
+            }
+            (Self::Cuda(s), Self::Cuda(idx)) => {
+                Ok(Self::Cuda(s.gnn_scatter_add(src_l, idx, idx_l, n_nodes)?))
+            }
+            (Self::Metal(s), Self::Metal(idx)) => {
+                Ok(Self::Metal(s.gnn_scatter_add(src_l, idx, idx_l, n_nodes)?))
+            }
+            _ => unreachable!(),
+        }
+    }
+
     pub(crate) fn index_select(
         &self,
         rhs: &Self,

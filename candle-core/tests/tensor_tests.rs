@@ -1203,6 +1203,40 @@ fn scatter(device: &Device) -> Result<()> {
     Ok(())
 }
 
+fn gnn_scatter_add(device: &Device) -> Result<()> {
+    // 4 edges, 3-D features, 3 nodes.
+    // Edge list: 0->1, 1->0, 2->1, 3->2
+    let src = Tensor::new(
+        &[[1.0f32, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0], [10.0, 11.0, 12.0]],
+        device,
+    )?;
+    let dst_idx = Tensor::new(&[1u32, 0, 1, 2], device)?;
+    let out = src.gnn_scatter_add(&dst_idx, 3)?;
+    assert_eq!(out.dims(), &[3, 3]);
+    // node 0 receives edge 1: [4,5,6]
+    // node 1 receives edges 0+2: [1+7, 2+8, 3+9] = [8,10,12]
+    // node 2 receives edge 3: [10,11,12]
+    assert_eq!(
+        out.to_vec2::<f32>()?,
+        &[[4.0, 5.0, 6.0], [8.0, 10.0, 12.0], [10.0, 11.0, 12.0]]
+    );
+
+    // Test with i64 index.
+    let dst_idx_i64 = Tensor::new(&[1i64, 0, 1, 2], device)?;
+    let out2 = src.gnn_scatter_add(&dst_idx_i64, 3)?;
+    assert_eq!(
+        out2.to_vec2::<f32>()?,
+        &[[4.0, 5.0, 6.0], [8.0, 10.0, 12.0], [10.0, 11.0, 12.0]]
+    );
+
+    // Isolated node: n_nodes=4, node 3 has no incoming edges => stays at zero.
+    let out3 = src.gnn_scatter_add(&dst_idx, 4)?;
+    assert_eq!(out3.dims(), &[4, 3]);
+    let v = out3.to_vec2::<f32>()?;
+    assert_eq!(v[3], vec![0.0f32, 0.0, 0.0]);
+    Ok(())
+}
+
 fn gather(device: &Device) -> Result<()> {
     let ids = Tensor::new(&[[0u32], [2u32], [1u32], [0u32]], device)?;
     let t = Tensor::arange(0f32, 12f32, device)?.reshape((4, 3))?;
@@ -1718,6 +1752,12 @@ test_device!(
 test_device!(index_add, index_add_cpu, index_add_gpu, index_add_metal);
 test_device!(gather, gather_cpu, gather_gpu, gather_metal);
 test_device!(scatter, scatter_cpu, scatter_gpu, scatter_metal);
+test_device!(
+    gnn_scatter_add,
+    gnn_scatter_add_cpu,
+    gnn_scatter_add_gpu,
+    gnn_scatter_add_metal
+);
 test_device!(
     slice_scatter,
     slice_scatter_cpu,

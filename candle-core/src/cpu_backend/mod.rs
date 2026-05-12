@@ -2942,6 +2942,100 @@ impl BackendStorage for CpuStorage {
         }
     }
 
+    fn gnn_scatter_add(
+        &self,
+        src_l: &Layout,
+        idx: &Self,
+        idx_l: &Layout,
+        n_nodes: usize,
+    ) -> Result<Self> {
+        fn inner<T: crate::WithDType, I: crate::IntDType>(
+            src: &[T],
+            src_l: &Layout,
+            ids: &[I],
+            n_nodes: usize,
+        ) -> Result<Vec<T>> {
+            let src = match src_l.contiguous_offsets() {
+                Some((a, b)) => &src[a..b],
+                None => Err(Error::RequiresContiguous { op: "gnn-scatter-add" }.bt())?,
+            };
+            let src_dims = src_l.dims();
+            if src_dims.len() != 2 {
+                crate::bail!(
+                    "gnn-scatter-add: src must be 2-D [E, D], got {:?}",
+                    src_dims
+                );
+            }
+            let e = src_dims[0];
+            let d = src_dims[1];
+            let mut out = vec![T::zero(); n_nodes * d];
+            for edge_i in 0..e {
+                let dst_idx = ids[edge_i];
+                if dst_idx == <I as num_traits::Bounded>::max_value() {
+                    continue;
+                }
+                let dst_idx = dst_idx.as_usize();
+                if dst_idx >= n_nodes {
+                    Err(Error::InvalidIndex {
+                        index: dst_idx,
+                        op: "gnn-scatter-add",
+                        size: n_nodes,
+                    })?
+                }
+                let src_row = &src[edge_i * d..(edge_i + 1) * d];
+                let dst_row = &mut out[dst_idx * d..(dst_idx + 1) * d];
+                for (o, &s) in dst_row.iter_mut().zip(src_row.iter()) {
+                    *o += s;
+                }
+            }
+            Ok(out)
+        }
+
+        let ids = match idx {
+            Self::U32(ids) => {
+                let ids = match idx_l.contiguous_offsets() {
+                    Some((a, b)) => &ids[a..b],
+                    None => Err(Error::RequiresContiguous { op: "gnn-scatter-add" }.bt())?,
+                };
+                match self {
+                    Self::BF16(src) => Self::BF16(inner(src, src_l, ids, n_nodes)?),
+                    Self::F16(src) => Self::F16(inner(src, src_l, ids, n_nodes)?),
+                    Self::F32(src) => Self::F32(inner(src, src_l, ids, n_nodes)?),
+                    Self::F64(src) => Self::F64(inner(src, src_l, ids, n_nodes)?),
+                    _ => Err(Error::UnsupportedDTypeForOp(self.dtype(), "gnn-scatter-add").bt())?,
+                }
+            }
+            Self::I32(ids) => {
+                let ids = match idx_l.contiguous_offsets() {
+                    Some((a, b)) => &ids[a..b],
+                    None => Err(Error::RequiresContiguous { op: "gnn-scatter-add" }.bt())?,
+                };
+                match self {
+                    Self::BF16(src) => Self::BF16(inner(src, src_l, ids, n_nodes)?),
+                    Self::F16(src) => Self::F16(inner(src, src_l, ids, n_nodes)?),
+                    Self::F32(src) => Self::F32(inner(src, src_l, ids, n_nodes)?),
+                    Self::F64(src) => Self::F64(inner(src, src_l, ids, n_nodes)?),
+                    _ => Err(Error::UnsupportedDTypeForOp(self.dtype(), "gnn-scatter-add").bt())?,
+                }
+            }
+            Self::I64(ids) => {
+                let ids = match idx_l.contiguous_offsets() {
+                    Some((a, b)) => &ids[a..b],
+                    None => Err(Error::RequiresContiguous { op: "gnn-scatter-add" }.bt())?,
+                };
+                match self {
+                    Self::BF16(src) => Self::BF16(inner(src, src_l, ids, n_nodes)?),
+                    Self::F16(src) => Self::F16(inner(src, src_l, ids, n_nodes)?),
+                    Self::F32(src) => Self::F32(inner(src, src_l, ids, n_nodes)?),
+                    Self::F64(src) => Self::F64(inner(src, src_l, ids, n_nodes)?),
+                    _ => Err(Error::UnsupportedDTypeForOp(self.dtype(), "gnn-scatter-add").bt())?,
+                }
+            }
+            _ => Err(Error::UnsupportedDTypeForOp(idx.dtype(), "gnn-scatter-add (index)").bt())?,
+        };
+        Ok(ids)
+    }
+
     fn matmul(
         &self,
         rhs: &Self,
