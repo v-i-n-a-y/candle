@@ -1775,7 +1775,7 @@ impl CudaStorage {
                     device,
                 })
             }
-            _ => Err(crate::Error::UnsupportedDtypeForOp(self.dtype(), "layer_norm_fused").bt()),
+            _ => crate::bail!("layer_norm_fused: unsupported dtype {:?}", self.dtype()),
         }
     }
 }

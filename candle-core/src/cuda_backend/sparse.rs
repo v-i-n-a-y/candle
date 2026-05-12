@@ -250,8 +250,7 @@ impl CsrMatrix {
 
         let feat_f32 = match &feat.slice {
             CudaStorageSlice::F32(s) => s,
-            _ => crate::bail!("CsrMatrix::spmm: only f32 feat is supported (got {:?}); \
-                               cast feat to f32 before calling gnn_spmm", feat.dtype()),
+            _ => crate::bail!("CsrMatrix::spmm: only f32 feat is supported; cast feat to f32 before calling gnn_spmm"),
         };
 
         // Require contiguous feat layout for the raw pointer passed to cuSPARSE.

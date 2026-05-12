@@ -1913,7 +1913,7 @@ impl Tensor {
                 let x_storage = _x.storage();
                 let w_storage = _weight.storage();
                 let b_storage = _bias.storage();
-                match (x_storage.as_ref(), w_storage.as_ref(), b_storage.as_ref()) {
+                match (&*x_storage, &*w_storage, &*b_storage) {
                     (
                         Storage::Cuda(x_cuda),
                         Storage::Cuda(w_cuda),
@@ -1953,7 +1953,7 @@ impl Tensor {
             let out_cuda = {
                 let lhs_storage = self.storage();
                 let rhs_storage = rhs.storage();
-                match (lhs_storage.as_ref(), rhs_storage.as_ref()) {
+                match (&*lhs_storage, &*rhs_storage) {
                     (Storage::Cuda(lhs_cuda), Storage::Cuda(rhs_cuda)) => {
                         lhs_cuda.fused_add_gelu(rhs_cuda, lhs_layout, rhs_layout)?
                     }
@@ -1987,7 +1987,7 @@ impl Tensor {
             let feat_layout = _feat.layout();
             let (out_cuda, d) = {
                 let feat_storage = _feat.storage();
-                match feat_storage.as_ref() {
+                match &*feat_storage {
                     Storage::Cuda(feat_cuda) => {
                         let device = feat_cuda.device().clone();
                         let csr =
