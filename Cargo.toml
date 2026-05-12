@@ -47,7 +47,12 @@ candle-transformers = { path = "./candle-transformers", version = "0.10.2" }
 candle-ug = { path = "./candle-ug", version = "0.10.2" }
 clap = { version = "4.2.4", features = ["derive"] }
 criterion = { version = "0.8", default-features = false }
-cudarc = { version = "0.19.4", features = [
+# Local fork adds CudaStream::alloc_async / free_async (cuMemAllocAsync stream-ordered
+# allocation). Switch back to crates.io once merged upstream:
+#   repo:   https://github.com/v-i-n-a-y/cudarc
+#   branch: perf/async-malloc
+# Production (git): cudarc = { git = "https://github.com/v-i-n-a-y/cudarc", branch = "perf/async-malloc", ... }
+cudarc = { path = "../cudarc", features = [
     "std",
     "cublas",
     "cublaslt",
