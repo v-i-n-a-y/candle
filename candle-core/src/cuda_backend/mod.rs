@@ -15,9 +15,11 @@ use half::{bf16, f16};
 pub mod cudnn;
 mod device;
 mod error;
+pub mod sparse;
 mod utils;
 pub use device::{CudaDevice, DeviceId};
 pub use error::{CudaError, WrapErr};
+pub use sparse::CsrMatrix;
 pub use utils::{Map1, Map1Any, Map2, Map2Any, Map2InPlace, Map3, S};
 
 pub enum SlicePtrOrNull<T> {
@@ -1271,6 +1273,47 @@ impl Map2 for FusedAddRelu {
     }
 }
 
+/// CUDA fused add+gelu kernel dispatcher.
+struct FusedAddGelu;
+
+impl Map2 for FusedAddGelu {
+    fn f<T: DeviceRepr + WithDType + ValidAsZeroBits>(
+        &self,
+        lhs: &CudaSlice<T>,
+        lhs_l: &Layout,
+        rhs: &CudaSlice<T>,
+        rhs_l: &Layout,
+        dev: &CudaDevice,
+    ) -> Result<CudaSlice<T>> {
+        let shape = lhs_l.shape();
+        let dims = shape.dims();
+        let elem_count = shape.elem_count();
+        let cfg = LaunchConfig::for_num_elems(elem_count as u32);
+        let dims_and_strides = if lhs_l.is_contiguous() && rhs_l.is_contiguous() {
+            SlicePtrOrNull::Null
+        } else {
+            SlicePtrOrNull::Ptr(
+                dev.clone_htod(&[dims, lhs_l.stride(), rhs_l.stride()].concat())?,
+            )
+        };
+        let lhs = &lhs.slice(lhs_l.start_offset()..);
+        let rhs = &rhs.slice(rhs_l.start_offset()..);
+        let func = dev.get_or_load_func(&kernel_name::<T>("fadd_gelu"), &kernels::BINARY)?;
+        // SAFETY: Set later by running the kernel.
+        let out = unsafe { dev.alloc_async::<T>(elem_count)? };
+        let mut builder = func.builder();
+        barg!(builder, elem_count);
+        barg!(builder, dims.len());
+        dims_and_strides.builder_arg(&mut builder);
+        builder.arg(lhs);
+        builder.arg(rhs);
+        builder.arg(&out);
+        // SAFETY: ffi
+        unsafe { builder.launch(cfg) }.w()?;
+        Ok(out)
+    }
+}
+
 struct Cmp(CmpOp);
 impl Map2Any for Cmp {
     fn f<T: DeviceRepr + WithDType + ValidAsZeroBits>(
@@ -1599,6 +1642,141 @@ impl CudaStorage {
         let device = self.device().clone();
         let slice = FusedAddRelu.map(&self.slice, lhs_l, &rhs.slice, rhs_l, &device)?;
         Ok(Self { slice, device })
+    }
+
+    pub(crate) fn fused_add_gelu(
+        &self,
+        rhs: &Self,
+        lhs_l: &Layout,
+        rhs_l: &Layout,
+    ) -> Result<Self> {
+        let device = self.device().clone();
+        let slice = FusedAddGelu.map(&self.slice, lhs_l, &rhs.slice, rhs_l, &device)?;
+        Ok(Self { slice, device })
+    }
+
+    pub(crate) fn layer_norm_fused(
+        &self,
+        layout: &Layout,
+        weight: &Self,
+        weight_l: &Layout,
+        bias: &Self,
+        bias_l: &Layout,
+        eps: f32,
+    ) -> Result<Self> {
+        let device = self.device().clone();
+        let shape = layout.shape();
+        let dims = shape.dims();
+        let d = *dims.last().unwrap();
+        let n = shape.elem_count() / d;
+
+        let (x_o1, x_o2) = layout.contiguous_offsets().ok_or_else(|| {
+            crate::Error::RequiresContiguous { op: "layer-norm-fused" }.bt()
+        })?;
+        let (w_o1, w_o2) = weight_l.contiguous_offsets().ok_or_else(|| {
+            crate::Error::RequiresContiguous { op: "layer-norm-fused-weight" }.bt()
+        })?;
+        let (b_o1, b_o2) = bias_l.contiguous_offsets().ok_or_else(|| {
+            crate::Error::RequiresContiguous { op: "layer-norm-fused-bias" }.bt()
+        })?;
+
+        match (&self.slice, &weight.slice, &bias.slice) {
+            (CudaStorageSlice::F32(x), CudaStorageSlice::F32(w), CudaStorageSlice::F32(b)) => {
+                let x_s = x.slice(x_o1..x_o2);
+                let w_s = w.slice(w_o1..w_o2);
+                let b_s = b.slice(b_o1..b_o2);
+                let out = unsafe { device.alloc_async::<f32>(n * d)? };
+                let func = device.get_or_load_func(
+                    "layer_norm_fused_f32",
+                    &kernels::LAYER_NORM_FUSED,
+                )?;
+                let block = (d.min(256)) as u32;
+                let cfg = LaunchConfig {
+                    grid_dim: (n as u32, 1, 1),
+                    block_dim: (block, 1, 1),
+                    shared_mem_bytes: 3 * block * 4,
+                };
+                let mut builder = func.builder();
+                barg!(builder, n);
+                barg!(builder, d);
+                barg!(builder, eps);
+                builder.arg(&x_s);
+                builder.arg(&w_s);
+                builder.arg(&b_s);
+                builder.arg(&out);
+                // SAFETY: ffi
+                unsafe { builder.launch(cfg) }.w()?;
+                Ok(Self {
+                    slice: CudaStorageSlice::F32(out),
+                    device,
+                })
+            }
+            (CudaStorageSlice::F16(x), CudaStorageSlice::F16(w), CudaStorageSlice::F16(b)) => {
+                let x_s = x.slice(x_o1..x_o2);
+                let w_s = w.slice(w_o1..w_o2);
+                let b_s = b.slice(b_o1..b_o2);
+                let out = unsafe { device.alloc_async::<half::f16>(n * d)? };
+                let func = device.get_or_load_func(
+                    "layer_norm_fused_f16",
+                    &kernels::LAYER_NORM_FUSED,
+                )?;
+                let block = (d.min(256)) as u32;
+                let cfg = LaunchConfig {
+                    grid_dim: (n as u32, 1, 1),
+                    block_dim: (block, 1, 1),
+                    shared_mem_bytes: 3 * block * 4,
+                };
+                let mut builder = func.builder();
+                barg!(builder, n);
+                barg!(builder, d);
+                barg!(builder, eps);
+                builder.arg(&x_s);
+                builder.arg(&w_s);
+                builder.arg(&b_s);
+                builder.arg(&out);
+                // SAFETY: ffi
+                unsafe { builder.launch(cfg) }.w()?;
+                Ok(Self {
+                    slice: CudaStorageSlice::F16(out),
+                    device,
+                })
+            }
+            (
+                CudaStorageSlice::BF16(x),
+                CudaStorageSlice::BF16(w),
+                CudaStorageSlice::BF16(b),
+            ) => {
+                let x_s = x.slice(x_o1..x_o2);
+                let w_s = w.slice(w_o1..w_o2);
+                let b_s = b.slice(b_o1..b_o2);
+                let out = unsafe { device.alloc_async::<half::bf16>(n * d)? };
+                let func = device.get_or_load_func(
+                    "layer_norm_fused_bf16",
+                    &kernels::LAYER_NORM_FUSED,
+                )?;
+                let block = (d.min(256)) as u32;
+                let cfg = LaunchConfig {
+                    grid_dim: (n as u32, 1, 1),
+                    block_dim: (block, 1, 1),
+                    shared_mem_bytes: 3 * block * 4,
+                };
+                let mut builder = func.builder();
+                barg!(builder, n);
+                barg!(builder, d);
+                barg!(builder, eps);
+                builder.arg(&x_s);
+                builder.arg(&w_s);
+                builder.arg(&b_s);
+                builder.arg(&out);
+                // SAFETY: ffi
+                unsafe { builder.launch(cfg) }.w()?;
+                Ok(Self {
+                    slice: CudaStorageSlice::BF16(out),
+                    device,
+                })
+            }
+            _ => Err(crate::Error::UnsupportedDtypeForOp(self.dtype(), "layer_norm_fused").bt()),
+        }
     }
 }
 

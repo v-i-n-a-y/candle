@@ -1,4 +1,81 @@
+#define _USE_MATH_DEFINES
 #include "cuda_utils.cuh"
+#include <math.h>
+
+// Fused add + GELU (tanh approximation).
+// out[i] = GELU(lhs[i] + rhs[i])
+// where GELU(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+#define BINARY_FUSED_ADD_GELU(TYPENAME, FN_NAME) \
+extern "C" __global__ void FN_NAME( \
+    const size_t numel, \
+    const size_t num_dims, \
+    const size_t *dims_and_strides, \
+    const TYPENAME *lhs, \
+    const TYPENAME *rhs, \
+    TYPENAME *out \
+) { \
+    const size_t *dims = dims_and_strides; \
+    const size_t *lhs_strides = dims_and_strides + 1 * num_dims; \
+    const size_t *rhs_strides = dims_and_strides + 2 * num_dims; \
+    bool lhs_cont = dims_and_strides == nullptr || is_contiguous(num_dims, dims, lhs_strides); \
+    bool rhs_cont = dims_and_strides == nullptr || is_contiguous(num_dims, dims, rhs_strides); \
+    if (lhs_cont && rhs_cont) { \
+        for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) { \
+            float s = (float)(lhs[i]) + (float)(rhs[i]); \
+            float s2 = s * s; float s3 = s2 * s; \
+            float alpha = s + 0.044715f * s3; \
+            float g = 0.5f * s * (1.0f + tanhf((float)(M_2_SQRTPI * M_SQRT1_2) * alpha)); \
+            out[i] = (TYPENAME)g; \
+        } \
+    } else if (lhs_cont) { \
+        for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) { \
+            unsigned int tmp_i = i; \
+            unsigned int rhs_i = 0; \
+            for (int d = num_dims - 1; d >= 0; d--) { \
+                unsigned int i_dim = tmp_i % dims[d]; \
+                rhs_i += i_dim * rhs_strides[d]; \
+                tmp_i /= dims[d]; \
+            } \
+            float s = (float)(lhs[i]) + (float)(rhs[rhs_i]); \
+            float s2 = s * s; float s3 = s2 * s; \
+            float alpha = s + 0.044715f * s3; \
+            float g = 0.5f * s * (1.0f + tanhf((float)(M_2_SQRTPI * M_SQRT1_2) * alpha)); \
+            out[i] = (TYPENAME)g; \
+        } \
+    } else if (rhs_cont) { \
+        for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) { \
+            unsigned int tmp_i = i; \
+            unsigned int lhs_i = 0; \
+            for (int d = num_dims - 1; d >= 0; d--) { \
+                unsigned int i_dim = tmp_i % dims[d]; \
+                lhs_i += i_dim * lhs_strides[d]; \
+                tmp_i /= dims[d]; \
+            } \
+            float s = (float)(lhs[lhs_i]) + (float)(rhs[i]); \
+            float s2 = s * s; float s3 = s2 * s; \
+            float alpha = s + 0.044715f * s3; \
+            float g = 0.5f * s * (1.0f + tanhf((float)(M_2_SQRTPI * M_SQRT1_2) * alpha)); \
+            out[i] = (TYPENAME)g; \
+        } \
+    } else { \
+        for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) { \
+            unsigned int tmp_i = i; \
+            unsigned int lhs_i = 0; \
+            unsigned int rhs_i = 0; \
+            for (int d = num_dims - 1; d >= 0; d--) { \
+                unsigned int i_dim = tmp_i % dims[d]; \
+                lhs_i += i_dim * lhs_strides[d]; \
+                rhs_i += i_dim * rhs_strides[d]; \
+                tmp_i /= dims[d]; \
+            } \
+            float s = (float)(lhs[lhs_i]) + (float)(rhs[rhs_i]); \
+            float s2 = s * s; float s3 = s2 * s; \
+            float alpha = s + 0.044715f * s3; \
+            float g = 0.5f * s * (1.0f + tanhf((float)(M_2_SQRTPI * M_SQRT1_2) * alpha)); \
+            out[i] = (TYPENAME)g; \
+        } \
+    } \
+} \
 
 #define BINARY_OP_OUT(TYPENAME, OUT_TYPENAME, FN_NAME, FUNC) \
 extern "C" __global__ void FN_NAME( \

@@ -57,6 +57,7 @@ cudarc = { git = "https://github.com/v-i-n-a-y/cudarc.git", branch = "perf/async
     "cublas",
     "cublaslt",
     "curand",
+    "cusparse",
     "driver",
     "nvrtc",
     "f16",

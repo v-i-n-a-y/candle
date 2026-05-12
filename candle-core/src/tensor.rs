@@ -1888,6 +1888,128 @@ impl Tensor {
         Ok(from_storage(storage, out_shape, op, false))
     }
 
+    /// Fused single-pass LayerNorm (CUDA only, f32/f16/bf16, contiguous input).
+    ///
+    /// Equivalent to `(x - mean) / sqrt(var + eps) * weight + bias` but dispatches a single
+    /// Welford-reduction kernel instead of candle's three-kernel sequence.
+    ///
+    /// # Arguments
+    /// * `x`      — input tensor of any shape with last dim D.
+    /// * `weight` — scale tensor of shape [D].
+    /// * `bias`   — shift tensor of shape [D].
+    /// * `eps`    — numerical stability constant.
+    pub fn layer_norm_fused(
+        _x: &Self,
+        _weight: &Self,
+        _bias: &Self,
+        _eps: f32,
+    ) -> Result<Self> {
+        #[cfg(feature = "cuda")]
+        {
+            let x_layout = _x.layout();
+            let w_layout = _weight.layout();
+            let b_layout = _bias.layout();
+            let out_cuda = {
+                let x_storage = _x.storage();
+                let w_storage = _weight.storage();
+                let b_storage = _bias.storage();
+                match (x_storage.as_ref(), w_storage.as_ref(), b_storage.as_ref()) {
+                    (
+                        Storage::Cuda(x_cuda),
+                        Storage::Cuda(w_cuda),
+                        Storage::Cuda(b_cuda),
+                    ) => x_cuda.layer_norm_fused(
+                        x_layout,
+                        w_cuda,
+                        w_layout,
+                        b_cuda,
+                        b_layout,
+                        _eps,
+                    )?,
+                    _ => crate::bail!("layer_norm_fused: requires CUDA tensors"),
+                }
+            };
+            let out_shape = _x.shape().clone();
+            return Ok(from_storage(
+                Storage::Cuda(out_cuda),
+                out_shape,
+                BackpropOp::none(),
+                false,
+            ));
+        }
+        crate::bail!("layer_norm_fused: requires CUDA feature")
+    }
+
+    /// Fused add + GELU: equivalent to `(self + rhs)?.gelu()?` but dispatches a single
+    /// kernel on CUDA, halving memory traffic and launch overhead.
+    ///
+    /// `rhs` must have the same shape and dtype as `self`. Only f32/f64/f16/bf16 supported.
+    pub fn add_gelu(&self, rhs: &Self) -> Result<Self> {
+        let _shape = self.same_shape_binary_op(rhs, "add_gelu")?;
+        #[cfg(feature = "cuda")]
+        {
+            let lhs_layout = self.layout();
+            let rhs_layout = rhs.layout();
+            let out_cuda = {
+                let lhs_storage = self.storage();
+                let rhs_storage = rhs.storage();
+                match (lhs_storage.as_ref(), rhs_storage.as_ref()) {
+                    (Storage::Cuda(lhs_cuda), Storage::Cuda(rhs_cuda)) => {
+                        lhs_cuda.fused_add_gelu(rhs_cuda, lhs_layout, rhs_layout)?
+                    }
+                    _ => crate::bail!("add_gelu: requires CUDA tensors"),
+                }
+            };
+            let out_shape = self.shape().clone();
+            return Ok(from_storage(
+                Storage::Cuda(out_cuda),
+                out_shape,
+                BackpropOp::none(),
+                false,
+            ));
+        }
+        crate::bail!("add_gelu: requires CUDA feature")
+    }
+
+    /// GNN message-passing aggregation via cuSPARSE SpMM.
+    ///
+    /// Computes `out[N, D] = A[N, N] × feat[N, D]` where `A` is the sparse adjacency
+    /// matrix encoded in `edge_index`.
+    ///
+    /// # Arguments
+    /// * `edge_index` — `[2, E]` integer tensor. Row 0 = source node IDs, row 1 = destination.
+    /// * `n_nodes`    — total number of nodes N.
+    /// * `feat`       — node feature tensor of shape `[N, D]` (f32, contiguous, CUDA).
+    pub fn gnn_spmm(_edge_index: &Self, _n_nodes: usize, _feat: &Self) -> Result<Self> {
+        #[cfg(feature = "cuda")]
+        {
+            use crate::cuda_backend::CsrMatrix;
+            let feat_layout = _feat.layout();
+            let (out_cuda, d) = {
+                let feat_storage = _feat.storage();
+                match feat_storage.as_ref() {
+                    Storage::Cuda(feat_cuda) => {
+                        let device = feat_cuda.device().clone();
+                        let csr =
+                            CsrMatrix::from_edge_index(_edge_index, _n_nodes, &device)?;
+                        let out_cuda = csr.spmm(feat_cuda, feat_layout, &device)?;
+                        let d = feat_layout.dims()[1];
+                        (out_cuda, d)
+                    }
+                    _ => crate::bail!("gnn_spmm: requires CUDA feat tensor"),
+                }
+            };
+            let out_shape = crate::Shape::from_dims(&[_n_nodes, d]);
+            return Ok(from_storage(
+                Storage::Cuda(out_cuda),
+                out_shape,
+                BackpropOp::none(),
+                false,
+            ));
+        }
+        crate::bail!("gnn_spmm: requires CUDA feature")
+    }
+
     /// Gather values across the target dimension.
     ///
     /// # Arguments
