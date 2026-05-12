@@ -2,6 +2,11 @@
 #include<stdint.h>
 
 #if __CUDA_ARCH__ >= 800
+BINARY_OP_INPLACE(__nv_bfloat16, iadd_bf16, x + y)
+BINARY_OP_INPLACE(__nv_bfloat16, isub_bf16, x - y)
+BINARY_OP_INPLACE(__nv_bfloat16, imul_bf16, x * y)
+BINARY_FUSED_ADD_RELU(__nv_bfloat16, fadd_relu_bf16)
+
 BINARY_OP(__nv_bfloat16, badd_bf16, x + y)
 BINARY_OP(__nv_bfloat16, bdiv_bf16, x / y)
 BINARY_OP(__nv_bfloat16, bmul_bf16, x * y)
@@ -32,6 +37,11 @@ BINARY_OP_OUT(__nv_fp8_e4m3, uint8_t, ge_f8_e4m3, F8E4M3_TO_FLOAT(x) >= F8E4M3_T
 #endif
 
 #if __CUDA_ARCH__ >= 530
+BINARY_OP_INPLACE(__half, iadd_f16, x + y)
+BINARY_OP_INPLACE(__half, isub_f16, x - y)
+BINARY_OP_INPLACE(__half, imul_f16, x * y)
+BINARY_FUSED_ADD_RELU(__half, fadd_relu_f16)
+
 BINARY_OP(__half, badd_f16, x + y)
 BINARY_OP(__half, bdiv_f16, x / y)
 BINARY_OP(__half, bmul_f16, x * y)
@@ -112,3 +122,22 @@ BINARY_OP_OUT(double, uint8_t, ge_f64, x >= y)
 BINARY_OP_OUT(uint8_t, uint8_t, ge_u8, x >= y)
 BINARY_OP_OUT(uint32_t, uint8_t, ge_u32, x >= y)
 BINARY_OP_OUT(int64_t, uint8_t, ge_i64, x >= y)
+
+BINARY_OP_INPLACE(float, iadd_f32, x + y)
+BINARY_OP_INPLACE(double, iadd_f64, x + y)
+BINARY_OP_INPLACE(uint8_t, iadd_u8, x + y)
+BINARY_OP_INPLACE(uint32_t, iadd_u32, x + y)
+BINARY_OP_INPLACE(int64_t, iadd_i64, x + y)
+BINARY_OP_INPLACE(float, isub_f32, x - y)
+BINARY_OP_INPLACE(double, isub_f64, x - y)
+BINARY_OP_INPLACE(uint8_t, isub_u8, x - y)
+BINARY_OP_INPLACE(uint32_t, isub_u32, x - y)
+BINARY_OP_INPLACE(int64_t, isub_i64, x - y)
+BINARY_OP_INPLACE(float, imul_f32, x * y)
+BINARY_OP_INPLACE(double, imul_f64, x * y)
+BINARY_OP_INPLACE(uint8_t, imul_u8, x * y)
+BINARY_OP_INPLACE(uint32_t, imul_u32, x * y)
+BINARY_OP_INPLACE(int64_t, imul_i64, x * y)
+
+BINARY_FUSED_ADD_RELU(float, fadd_relu_f32)
+BINARY_FUSED_ADD_RELU(double, fadd_relu_f64)

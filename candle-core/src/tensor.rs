@@ -2758,6 +2758,12 @@ impl Tensor {
         std::ptr::eq(lhs, rhs)
     }
 
+    /// Returns true if no other `Tensor` (or `Var`) references the same underlying `Tensor_`.
+    /// Used to gate in-place operations that would otherwise violate aliasing invariants.
+    pub fn is_unique_storage(&self) -> bool {
+        Arc::strong_count(&self.0) == 1
+    }
+
     /// Normalize a 'relative' axis value: positive values are kept, negative
     /// values means counting the dimensions from the back.
     pub fn normalize_axis(&self, axis: i64) -> Result<usize> {

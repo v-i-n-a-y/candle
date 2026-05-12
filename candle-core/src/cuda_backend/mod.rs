@@ -1124,6 +1124,86 @@ impl<U: crate::op::BinaryOpT> Map2 for U {
     }
 }
 
+/// CUDA in-place binary op: dispatches `iadd`, `isub`, or `imul` kernels.
+/// The kernel name prefix is stored in the struct (e.g. "iadd", "isub", "imul").
+struct BinaryInPlace<'a>(&'a str);
+
+impl Map2InPlace for BinaryInPlace<'_> {
+    fn f<T: DeviceRepr + WithDType + ValidAsZeroBits>(
+        &self,
+        dst: &mut CudaSlice<T>,
+        dst_l: &Layout,
+        src: &CudaSlice<T>,
+        src_l: &Layout,
+        dev: &CudaDevice,
+    ) -> Result<()> {
+        let shape = dst_l.shape();
+        let dims = shape.dims();
+        let elem_count = shape.elem_count();
+        let cfg = LaunchConfig::for_num_elems(elem_count as u32);
+        let dims_and_strides = if dst_l.is_contiguous() && src_l.is_contiguous() {
+            SlicePtrOrNull::Null
+        } else {
+            SlicePtrOrNull::Ptr(
+                dev.clone_htod(&[dims, dst_l.stride(), src_l.stride()].concat())?,
+            )
+        };
+        let func = dev.get_or_load_func(&kernel_name::<T>(self.0), &kernels::BINARY)?;
+        let dst_view = dst.slice_mut(dst_l.start_offset()..);
+        let src_view = src.slice(src_l.start_offset()..);
+        let mut builder = func.builder();
+        barg!(builder, elem_count);
+        barg!(builder, dims.len());
+        dims_and_strides.builder_arg(&mut builder);
+        builder.arg(&dst_view);
+        builder.arg(&src_view);
+        // SAFETY: ffi
+        unsafe { builder.launch(cfg) }.w()?;
+        Ok(())
+    }
+}
+
+/// CUDA fused add+relu kernel dispatcher.
+struct FusedAddRelu;
+
+impl Map2 for FusedAddRelu {
+    fn f<T: DeviceRepr + WithDType + ValidAsZeroBits>(
+        &self,
+        lhs: &CudaSlice<T>,
+        lhs_l: &Layout,
+        rhs: &CudaSlice<T>,
+        rhs_l: &Layout,
+        dev: &CudaDevice,
+    ) -> Result<CudaSlice<T>> {
+        let shape = lhs_l.shape();
+        let dims = shape.dims();
+        let elem_count = shape.elem_count();
+        let cfg = LaunchConfig::for_num_elems(elem_count as u32);
+        let dims_and_strides = if lhs_l.is_contiguous() && rhs_l.is_contiguous() {
+            SlicePtrOrNull::Null
+        } else {
+            SlicePtrOrNull::Ptr(
+                dev.clone_htod(&[dims, lhs_l.stride(), rhs_l.stride()].concat())?,
+            )
+        };
+        let lhs = &lhs.slice(lhs_l.start_offset()..);
+        let rhs = &rhs.slice(rhs_l.start_offset()..);
+        let func = dev.get_or_load_func(&kernel_name::<T>("fadd_relu"), &kernels::BINARY)?;
+        // SAFETY: Set later by running the kernel.
+        let out = unsafe { dev.alloc::<T>(elem_count)? };
+        let mut builder = func.builder();
+        barg!(builder, elem_count);
+        barg!(builder, dims.len());
+        dims_and_strides.builder_arg(&mut builder);
+        builder.arg(lhs);
+        builder.arg(rhs);
+        builder.arg(&out);
+        // SAFETY: ffi
+        unsafe { builder.launch(cfg) }.w()?;
+        Ok(out)
+    }
+}
+
 struct Cmp(CmpOp);
 impl Map2Any for Cmp {
     fn f<T: DeviceRepr + WithDType + ValidAsZeroBits>(
@@ -1648,6 +1728,27 @@ impl BackendStorage for CudaStorage {
     fn affine(&self, layout: &Layout, mul: f64, add: f64) -> Result<Self> {
         let device = self.device().clone();
         let slice = Affine(mul, add).map(&self.slice, &device, layout)?;
+        Ok(Self { slice, device })
+    }
+
+    pub(crate) fn binary_inplace(
+        &mut self,
+        op: &'static str,
+        rhs: &Self,
+        lhs_l: &Layout,
+        rhs_l: &Layout,
+    ) -> Result<()> {
+        BinaryInPlace(op).map(&mut self.slice, lhs_l, &rhs.slice, rhs_l, &self.device)
+    }
+
+    pub(crate) fn fused_add_relu(
+        &self,
+        rhs: &Self,
+        lhs_l: &Layout,
+        rhs_l: &Layout,
+    ) -> Result<Self> {
+        let device = self.device().clone();
+        let slice = FusedAddRelu.map(&self.slice, lhs_l, &rhs.slice, rhs_l, &device)?;
         Ok(Self { slice, device })
     }
 

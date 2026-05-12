@@ -79,6 +79,7 @@ pub mod safetensors;
 pub mod scalar;
 pub mod shape;
 mod sort;
+mod inplace_ops;
 mod storage;
 pub mod streaming;
 mod strided_index;
