@@ -15,7 +15,7 @@
 // out[row, d] = (x[row,d] - mean) / sqrt(var + eps) * weight[d] + bias[d]
 
 template <typename T>
-__global__ void layer_norm_fused_kernel(
+__device__ __forceinline__ void layer_norm_fused_kernel(
     const size_t N,
     const size_t D,
     const float eps,
