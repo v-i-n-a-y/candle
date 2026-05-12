@@ -120,10 +120,10 @@ impl Module for LayerNorm {
         #[cfg(feature = "cuda")]
         if x.is_contiguous() && self.remove_mean {
             if let Some(bias) = &self.bias {
-                if matches!(x.device(), candle_core::Device::Cuda(_))
+                if matches!(x.device(), candle::Device::Cuda(_))
                     && matches!(x.dtype(), DType::F32 | DType::F16 | DType::BF16)
                 {
-                    return candle_core::Tensor::layer_norm_fused(
+                    return candle::Tensor::layer_norm_fused(
                         x,
                         &self.weight,
                         bias,
