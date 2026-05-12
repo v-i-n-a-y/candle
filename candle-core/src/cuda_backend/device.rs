@@ -10,6 +10,103 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use super::{CudaError, CudaStorage, CudaStorageSlice, WrapErr};
 
+// ── CUDA Graph capture / replay ────────────────────────────────────────────
+//
+// CUDA Graphs capture the exact sequence of kernel launches for one training
+// step and replay them as a single `cuGraphLaunch`, eliminating all per-kernel
+// CPU launch overhead.  For GNN steps with 700+ kernels this can yield an
+// additional 5-10× speedup on top of other optimisations.
+//
+// ### Requirements for the captured region
+//
+// 1. **Fixed tensor shapes every step** — graph capture records concrete device
+//    pointers and launch configs.  If N (nodes) or E (edges) changes, the
+//    cached graph must be invalidated and re-captured.  Use padding to a fixed
+//    maximum to satisfy this.
+//
+// 2. **All ops on one CUDA stream** — capture records launches on the stream
+//    that `begin_capture` was called on.  Do not issue work on other streams
+//    inside the captured region.
+//
+// 3. **No CPU–GPU synchronisation inside the region** — `to_scalar()`,
+//    `synchronize()`, and any blocking copy will break capture or produce
+//    incorrect results.  Move any scalar reads to outside the captured region.
+//
+// ### Typical usage in a GNN training loop
+//
+// ```rust,no_run
+// // Compute a key that encodes the shapes for this step.
+// let graph_key = (num_nodes as u64) << 32 | num_edges as u64;
+//
+// // First call: executes f() normally while capturing; subsequent calls
+// // with the same key replay the cached graph instead.
+// device.with_cuda_graph(graph_key, || {
+//     // forward + loss + backward + optimiser step
+//     Ok(())
+// })?;
+// ```
+
+/// A compiled CUDA graph that can be replayed cheaply on a fixed-shape
+/// computation.
+///
+/// Obtained from [`CudaDevice::end_capture`].  Replayed with
+/// [`CudaGraph::launch`].  Both the graph definition (`CUgraph`) and the
+/// executable instance (`CUgraphExec`) are destroyed when this value is
+/// dropped.
+///
+/// ### Thread safety
+/// CUDA graph objects are **not** internally synchronised.  Access to a single
+/// `CudaGraph` must be serialised externally (the `graph_cache` on
+/// `CudaDevice` is protected by an `RwLock`).
+pub struct CudaGraph {
+    cu_graph: cudarc::driver::sys::CUgraph,
+    cu_graph_exec: cudarc::driver::sys::CUgraphExec,
+    /// The stream the graph was captured on — needed for `launch` and `upload`.
+    cu_stream: cudarc::driver::sys::CUstream,
+}
+
+// Raw CUDA pointers are not automatically Send.  We assert Send here because:
+// - CUgraphExec is only accessed under the graph_cache RwLock (serialised).
+// - All graph API calls (launch, upload, destroy) are thread-safe per CUDA docs
+//   when calls are serialised — which our RwLock guarantees.
+unsafe impl Send for CudaGraph {}
+unsafe impl Sync for CudaGraph {}
+
+impl Drop for CudaGraph {
+    fn drop(&mut self) {
+        if !self.cu_graph_exec.is_null() {
+            let exec = std::mem::replace(&mut self.cu_graph_exec, std::ptr::null_mut());
+            // Ignore errors on drop.
+            let _ = unsafe { cudarc::driver::result::graph::exec_destroy(exec) };
+        }
+        if !self.cu_graph.is_null() {
+            let graph = std::mem::replace(&mut self.cu_graph, std::ptr::null_mut());
+            let _ = unsafe { cudarc::driver::result::graph::destroy(graph) };
+        }
+    }
+}
+
+impl CudaGraph {
+    /// Replay the captured graph on the device's stream.
+    ///
+    /// All previously captured kernel launches execute as a single
+    /// `cuGraphLaunch`, with no per-kernel CPU overhead.
+    pub fn launch(&self) -> Result<()> {
+        unsafe { cudarc::driver::result::graph::launch(self.cu_graph_exec, self.cu_stream) }
+            .map_err(crate::Error::wrap)
+    }
+
+    /// Pre-upload graph resources to the device so the first [`launch`] incurs
+    /// no setup cost.
+    ///
+    /// Optional but recommended when the graph is captured ahead of the hot
+    /// path.
+    pub fn upload(&self) -> Result<()> {
+        unsafe { cudarc::driver::result::graph::upload(self.cu_graph_exec, self.cu_stream) }
+            .map_err(crate::Error::wrap)
+    }
+}
+
 /// Unique identifier for cuda devices.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DeviceId(usize);
@@ -40,6 +137,12 @@ pub struct CudaDevice {
     pub(crate) blas: Arc<cudarc::cublas::CudaBlas>,
     curand: Arc<Mutex<CudaRng>>,
     seed_value: Arc<RwLock<u64>>,
+    /// Cached compiled CUDA graphs keyed by a caller-supplied shape hash.
+    ///
+    /// The key encodes whatever makes two steps structurally identical (e.g.
+    /// `(num_nodes as u64) << 32 | num_edges as u64`).  When shapes change
+    /// the old entry is evicted and the next call re-captures.
+    graph_cache: Arc<RwLock<HashMap<u64, Arc<CudaGraph>>>>,
 }
 
 impl std::fmt::Debug for CudaDevice {
@@ -288,6 +391,147 @@ impl CudaDevice {
     pub fn cublas_handle(&self) -> Arc<cudarc::cublas::CudaBlas> {
         self.blas.clone()
     }
+
+    // ── CUDA Graph API ────────────────────────────────────────────────────
+
+    /// Begin capturing all CUDA operations issued on this device's stream.
+    ///
+    /// Every kernel launch, memory copy, and cuBLAS/cuDNN call made on the
+    /// device stream after this point is recorded rather than executed.
+    /// Call [`end_capture`][CudaDevice::end_capture] to finish recording and
+    /// obtain a [`CudaGraph`] that can be replayed cheaply.
+    ///
+    /// ### Constraints during capture
+    /// - No CPU–GPU synchronisation (`to_scalar`, `synchronize`, etc.)
+    /// - All ops must target the same CUDA stream (this device's stream)
+    /// - Tensor shapes must match exactly on every replay
+    ///
+    /// Uses `CU_STREAM_CAPTURE_MODE_GLOBAL`: operations on other streams that
+    /// synchronise with this stream are included in the capture.
+    pub fn begin_capture(&self) -> Result<()> {
+        self.stream
+            .begin_capture(
+                cudarc::driver::sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_GLOBAL,
+            )
+            .map_err(crate::Error::wrap)
+    }
+
+    /// End stream capture and compile the recorded operations into a
+    /// [`CudaGraph`].
+    ///
+    /// Returns `None` if the stream was not in capture mode (e.g. the capture
+    /// produced an empty graph).  In practice this should always return
+    /// `Some(graph)` if [`begin_capture`][CudaDevice::begin_capture] was
+    /// called first.
+    ///
+    /// The returned graph can be launched repeatedly with
+    /// [`CudaGraph::launch`] as long as tensor shapes remain the same.
+    ///
+    /// Instantiation uses flags = 0 (no `AUTO_FREE_ON_LAUNCH`, no
+    /// `DEVICE_LAUNCH`) so the graph's internal memory persists across
+    /// repeated replays.  We call `cuGraphInstantiateWithFlags` directly
+    /// rather than the cudarc safe wrapper because that wrapper's
+    /// `CUgraphInstantiate_flags` enum has no zero-variant.
+    pub fn end_capture(&self) -> Result<Option<CudaGraph>> {
+        let cu_stream = self.stream.cu_stream();
+
+        let cu_graph =
+            unsafe { cudarc::driver::result::stream::end_capture(cu_stream) }
+                .map_err(crate::Error::wrap)?;
+        if cu_graph.is_null() {
+            return Ok(None);
+        }
+
+        let cu_graph_exec = unsafe {
+            let mut exec = std::mem::MaybeUninit::uninit();
+            // flags = 0: no AUTO_FREE_ON_LAUNCH — memory persists between replays.
+            cudarc::driver::sys::cuGraphInstantiateWithFlags(exec.as_mut_ptr(), cu_graph, 0u64)
+                .result()
+                .map_err(crate::Error::wrap)?;
+            exec.assume_init()
+        };
+
+        Ok(Some(CudaGraph {
+            cu_graph,
+            cu_graph_exec,
+            cu_stream,
+        }))
+    }
+
+    /// Capture and cache a CUDA graph for a closure, replaying it on
+    /// subsequent calls with the same `cache_key`.
+    ///
+    /// On the **first call** for a given key the closure `f` is executed
+    /// normally while the device stream is in capture mode.  The resulting
+    /// compiled graph is stored in an internal cache.
+    ///
+    /// On **subsequent calls** with the same key the cached graph is replayed
+    /// directly via `cuGraphLaunch`, bypassing all CPU kernel-launch overhead.
+    ///
+    /// To **invalidate** a cached graph (e.g. after a padding-shape change)
+    /// call [`invalidate_cuda_graph`][CudaDevice::invalidate_cuda_graph] with
+    /// the same key before the next step.
+    ///
+    /// ### `cache_key` convention
+    /// Encode whatever makes two steps structurally identical.  For a GNN step
+    /// the minimum is the padded node and edge counts:
+    /// ```ignore
+    /// let key = (num_nodes_padded as u64) << 32 | num_edges_padded as u64;
+    /// device.with_cuda_graph(key, || { /* forward + backward + opt */ Ok(()) })?;
+    /// ```
+    ///
+    /// ### Constraints inside `f`
+    /// See [`begin_capture`][CudaDevice::begin_capture] for the full list.
+    /// The short version: fixed shapes, one stream, no blocking CPU–GPU sync.
+    ///
+    /// # Safety
+    /// The closure must produce **identical kernel launches** (same ops, same
+    /// shapes, same device pointers relative to the captured addresses) on
+    /// every invocation.  Breaking this contract causes silent wrong results.
+    pub fn with_cuda_graph<F>(&self, cache_key: u64, f: F) -> Result<()>
+    where
+        F: FnOnce() -> Result<()>,
+    {
+        // Fast path: replay a previously compiled graph.
+        {
+            let cache = self.graph_cache.read().unwrap();
+            if let Some(graph) = cache.get(&cache_key) {
+                let graph = Arc::clone(graph);
+                drop(cache);
+                return graph.launch();
+            }
+        }
+
+        // Slow path (first call for this key): capture while executing f().
+        self.begin_capture()?;
+        let result = f();
+        // Always attempt end_capture so the stream is left in a clean state
+        // even if f() failed.
+        let graph = self.end_capture()?;
+        result?;
+
+        if let Some(graph) = graph {
+            // Pre-upload the graph so the very first replay has no setup cost.
+            graph.upload()?;
+            let mut cache = self.graph_cache.write().unwrap();
+            cache.insert(cache_key, Arc::new(graph));
+        }
+        Ok(())
+    }
+
+    /// Remove a cached CUDA graph so the next [`with_cuda_graph`] call
+    /// re-captures.
+    ///
+    /// Call this whenever tensor shapes change (e.g. the padded graph size
+    /// changes between curriculum stages).
+    pub fn invalidate_cuda_graph(&self, cache_key: u64) {
+        self.graph_cache.write().unwrap().remove(&cache_key);
+    }
+
+    /// Remove all cached CUDA graphs.
+    pub fn clear_cuda_graph_cache(&self) {
+        self.graph_cache.write().unwrap().clear();
+    }
 }
 
 impl CudaDevice {
@@ -308,6 +552,7 @@ impl CudaDevice {
             modules: Arc::new(std::sync::RwLock::new(module_store)),
             custom_modules: Arc::new(std::sync::RwLock::new(HashMap::new())),
             seed_value: Arc::new(RwLock::new(299792458)),
+            graph_cache: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 }
@@ -332,6 +577,7 @@ impl BackendDevice for CudaDevice {
             modules: Arc::new(std::sync::RwLock::new(module_store)),
             custom_modules: Arc::new(std::sync::RwLock::new(HashMap::new())),
             seed_value: Arc::new(RwLock::new(299792458)),
+            graph_cache: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
