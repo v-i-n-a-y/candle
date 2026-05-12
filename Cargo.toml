@@ -52,7 +52,7 @@ criterion = { version = "0.8", default-features = false }
 #   repo:   https://github.com/v-i-n-a-y/cudarc
 #   branch: perf/async-malloc
 # Production (git): cudarc = { git = "https://github.com/v-i-n-a-y/cudarc", branch = "perf/async-malloc", ... }
-cudarc = { path = "../cudarc", features = [
+cudarc = { git = "https://github.com/v-i-n-a-y/cudarc.git", branch = "perf/async-malloc", features = [
     "std",
     "cublas",
     "cublaslt",
