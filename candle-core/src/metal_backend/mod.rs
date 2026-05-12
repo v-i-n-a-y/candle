@@ -1672,6 +1672,20 @@ impl BackendStorage for MetalStorage {
         Ok(acc)
     }
 
+    fn gnn_scatter_add(
+        &self,
+        src_l: &Layout,
+        idx: &Self,
+        idx_l: &Layout,
+        n_nodes: usize,
+    ) -> Result<Self> {
+        // Fall back to CPU: copy to host, compute, copy result back.
+        let src_cpu = self.to_cpu_storage()?;
+        let idx_cpu = idx.to_cpu_storage()?;
+        let out_cpu = src_cpu.gnn_scatter_add(src_l, &idx_cpu, idx_l, n_nodes)?;
+        self.device.storage_from_cpu_storage(&out_cpu)
+    }
+
     fn matmul(
         &self,
         rhs: &Self,

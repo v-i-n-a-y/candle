@@ -156,6 +156,16 @@ impl crate::backend::BackendStorage for MetalStorage {
         Err(Error::NotCompiledWithMetalSupport)
     }
 
+    fn gnn_scatter_add(
+        &self,
+        _: &Layout,
+        _: &Self,
+        _: &Layout,
+        _: usize,
+    ) -> Result<Self> {
+        Err(Error::NotCompiledWithMetalSupport)
+    }
+
     fn index_add(
         &self,
         _: &Layout,

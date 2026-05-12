@@ -455,3 +455,61 @@ S_OP(double, uint8_t, s_u8_f64)
 S_OP(uint8_t, uint8_t, s_u8_u8)
 S_OP(uint32_t, uint8_t, s_u8_u32)
 S_OP(int64_t, uint8_t, s_u8_i64)
+
+// GNN edge-parallel scatter_add (PyTorch scatter_add_ semantics for dim=0).
+//
+// Each CUDA thread handles one (edge, feature) pair:
+//   out[index[e], d] += src[e, d]
+//
+// src:   [E, D]  -- edge feature matrix
+// index: [E]     -- destination node indices (receiver IDs), dtype I
+// out:   [N, D]  -- destination node feature matrix (pre-zeroed or accumulating)
+//
+// Grid: (ceil(E/BX), ceil(D/BY)) -- fully parallel over edges and features.
+// atomicAdd serialises only the true write conflicts (edges sharing a dst node).
+template<typename T, typename I>
+__device__ void gnn_scatter_add_kernel(
+    const size_t E,
+    const size_t N,
+    const size_t D,
+    const T* __restrict__ src,
+    const I* __restrict__ index,
+    T* out
+) {
+    const size_t e = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t d = blockIdx.y * blockDim.y + threadIdx.y;
+    if (e >= E || d >= D) return;
+    const I dst = index[e];
+    if (dst == max_value<I>()) return;
+    assert((size_t)dst < N);
+    atomicAdd(&out[dst * D + d], src[e * D + d]);
+}
+
+#define GNN_SA_OP(TYPENAME, INDEX_TYPENAME, FN_NAME) \
+extern "C" __global__ void FN_NAME( \
+    const size_t E, \
+    const size_t N, \
+    const size_t D, \
+    const TYPENAME* __restrict__ src, \
+    const INDEX_TYPENAME* __restrict__ index, \
+    TYPENAME* out \
+) { gnn_scatter_add_kernel<TYPENAME, INDEX_TYPENAME>(E, N, D, src, index, out); }
+
+#if __CUDA_ARCH__ >= 800
+GNN_SA_OP(__nv_bfloat16, int64_t, gnn_sa_i64_bf16)
+GNN_SA_OP(__nv_bfloat16, uint32_t, gnn_sa_u32_bf16)
+GNN_SA_OP(__nv_bfloat16, int32_t, gnn_sa_i32_bf16)
+#endif
+
+#if __CUDA_ARCH__ >= 530
+GNN_SA_OP(__half, int64_t, gnn_sa_i64_f16)
+GNN_SA_OP(__half, uint32_t, gnn_sa_u32_f16)
+GNN_SA_OP(__half, int32_t, gnn_sa_i32_f16)
+#endif
+
+GNN_SA_OP(float, int64_t, gnn_sa_i64_f32)
+GNN_SA_OP(double, int64_t, gnn_sa_i64_f64)
+GNN_SA_OP(float, uint32_t, gnn_sa_u32_f32)
+GNN_SA_OP(double, uint32_t, gnn_sa_u32_f64)
+GNN_SA_OP(float, int32_t, gnn_sa_i32_f32)
+GNN_SA_OP(double, int32_t, gnn_sa_i32_f64)

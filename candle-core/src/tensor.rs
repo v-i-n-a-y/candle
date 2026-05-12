@@ -1839,6 +1839,57 @@ impl Tensor {
         Ok(from_storage(storage, self.shape(), op, false))
     }
 
+    /// Edge-parallel scatter_add for GNN message passing.
+    ///
+    /// Equivalent to PyTorch scatter_add_(0, index.unsqueeze(1).expand(-1, D), src) on a
+    /// zero tensor of shape [n_nodes, D], but implemented as a single fused CUDA kernel that
+    /// parallelises over (edge, feature) pairs with atomicAdd.
+    ///
+    /// # Arguments
+    /// * self — source tensor of shape [E, D] (edge features).
+    /// * index — 1-D integer tensor of shape [E] (destination node IDs), dtype u32/i32/i64.
+    /// * n_nodes — total number of destination nodes N.
+    ///
+    /// # Returns
+    /// A new tensor of shape [n_nodes, D] with accumulated values.
+    pub fn gnn_scatter_add(&self, index: &Self, n_nodes: usize) -> Result<Self> {
+        let src_dims = self.dims();
+        if src_dims.len() != 2 {
+            crate::bail!(
+                "gnn_scatter_add: src must be 2-D [E, D], got {:?}",
+                src_dims
+            );
+        }
+        if index.rank() != 1 {
+            crate::bail!(
+                "gnn_scatter_add: index must be 1-D [E], got shape {:?}",
+                index.shape()
+            );
+        }
+        let e = src_dims[0];
+        if index.dim(0)? != e {
+            crate::bail!(
+                "gnn_scatter_add: index length {} does not match src dim0 {}",
+                index.dim(0)?,
+                e
+            );
+        }
+        let d = src_dims[1];
+        let storage = self.storage().gnn_scatter_add(
+            self.layout(),
+            &index.storage(),
+            index.layout(),
+            n_nodes,
+        )?;
+        let out_shape = crate::Shape::from_dims(&[n_nodes, d]);
+        Ok(from_storage(
+            storage,
+            out_shape,
+            crate::op::BackpropOp::none(),
+            false,
+        ))
+    }
+
     /// Gather values across the target dimension.
     ///
     /// # Arguments
@@ -2756,6 +2807,12 @@ impl Tensor {
         let lhs: &RwLock<Storage> = self.storage.as_ref();
         let rhs: &RwLock<Storage> = rhs.storage.as_ref();
         std::ptr::eq(lhs, rhs)
+    }
+
+    /// Returns true if no other `Tensor` (or `Var`) references the same underlying `Tensor_`.
+    /// Used to gate in-place operations that would otherwise violate aliasing invariants.
+    pub fn is_unique_storage(&self) -> bool {
+        Arc::strong_count(&self.0) == 1
     }
 
     /// Normalize a 'relative' axis value: positive values are kept, negative

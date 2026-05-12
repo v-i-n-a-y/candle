@@ -112,6 +112,14 @@ pub trait BackendStorage: Sized {
         _: usize,
     ) -> Result<Self>;
 
+    fn gnn_scatter_add(
+        &self,
+        _src_l: &Layout,
+        _idx: &Self,
+        _idx_l: &Layout,
+        _n_nodes: usize,
+    ) -> Result<Self>;
+
     fn matmul(
         &self,
         _: &Self,
