@@ -1998,10 +1998,16 @@ impl Tensor {
                 }
             };
             let out_shape = crate::Shape::from_dims(&[_n_nodes, d]);
+            // Autograd: record GnnSpmm so backward can compute grad_feat = A^T * grad.
+            // edge_index is integer and never receives a gradient.
+            let n_nodes = _n_nodes;
+            let op = BackpropOp::new2(_edge_index, _feat, move |ei, f| {
+                crate::op::Op::GnnSpmm(ei, f, n_nodes)
+            });
             return Ok(from_storage(
                 Storage::Cuda(out_cuda),
                 out_shape,
-                BackpropOp::none(),
+                op,
                 false,
             ));
         }

@@ -87,6 +87,7 @@ impl Tensor {
                         ..
                     }
                     | Op::GnnScatterAdd(lhs, rhs, _)
+                    | Op::GnnSpmm(lhs, rhs, _)
                     | Op::CustomOp2(lhs, rhs, _)
                     | Op::Binary(lhs, rhs, _)
                     | Op::Gather(lhs, rhs, _)
@@ -488,6 +489,22 @@ impl Tensor {
                         let src_sum_grad = grads.or_insert(src)?;
                         *src_sum_grad = src_sum_grad.add(&grad_src)?;
                         // index is integer — no gradient
+                    }
+                    Op::GnnSpmm(edge_index, feat, n_nodes) => {
+                        // For out = A * feat, grad_feat = A^T * grad_out.
+                        // Build A^T by swapping rows 0 and 1 of edge_index
+                        // (row 0 = src/col of A → row of A^T; row 1 = dst/row → col of A^T).
+                        use crate::IndexOp;
+                        let src_row = edge_index.i(0)?;
+                        let dst_row = edge_index.i(1)?;
+                        let edge_index_t = Tensor::stack(&[&dst_row, &src_row], 0)?;
+                        // SpMM with transposed adjacency. The inner Tensor::gnn_spmm
+                        // call records its own (rarely-used) second-order Op, which
+                        // is fine — gradients of gradients are valid.
+                        let grad_feat = Tensor::gnn_spmm(&edge_index_t, *n_nodes, &grad)?;
+                        let feat_sum_grad = grads.or_insert(feat)?;
+                        *feat_sum_grad = feat_sum_grad.add(&grad_feat)?;
+                        // edge_index is integer — no gradient
                     }
                     Op::IndexSelect(arg, indexes, dim) => {
                         let sum_grad = grads.or_insert(arg)?;

@@ -87,6 +87,11 @@ pub enum Op {
     IndexAdd(Tensor, Tensor, Tensor, usize),
     // (index, src, n_nodes) — index is 1-D [E], src is 2-D [E, D], output is [n_nodes, D]
     GnnScatterAdd(Tensor, Tensor, usize),
+    // (edge_index, feat, n_nodes) — edge_index is [2, E] (row 0 = src/col, row 1 = dst/row),
+    // feat is [N, D], output is [n_nodes, D]. SpMM: out = A * feat where A is the unweighted
+    // CSR adjacency built from edge_index. Backward via spmm with transposed edge_index
+    // (rows swapped).
+    GnnSpmm(Tensor, Tensor, usize),
     // (x, weight, bias, eps) — fused single-pass LayerNorm forward; backward recomputes stats.
     LayerNormFused(Tensor, Tensor, Tensor, f32),
     WhereCond(Tensor, Tensor, Tensor),
