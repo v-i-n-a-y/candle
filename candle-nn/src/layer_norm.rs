@@ -115,23 +115,25 @@ impl LayerNorm {
 
 impl Module for LayerNorm {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        // Fast path: fused single-pass Welford kernel with correct backward.
-        // The backward is implemented via Op::LayerNormFused in backprop.rs.
-        #[cfg(feature = "cuda")]
-        if x.is_contiguous() && self.remove_mean {
-            if let Some(bias) = &self.bias {
-                if matches!(x.device(), candle::Device::Cuda(_))
-                    && matches!(x.dtype(), DType::F32 | DType::F16 | DType::BF16)
-                {
-                    return candle::Tensor::layer_norm_fused(
-                        x,
-                        &self.weight,
-                        bias,
-                        self.eps as f32,
-                    );
-                }
-            }
-        }
+        // Fused-LN fast path disabled: although the kernel saves launches,
+        // its backward stores the full `x` tensor to recompute x_hat, which
+        // hurts throughput on MPNN workloads where LN is called 40+ times
+        // per step over large [E, H] inputs. The `crate::ops::layer_norm`
+        // path below is faster on A6000/GB10 for this profile. Re-enable
+        // by uncommenting if a future kernel avoids the recompute storage.
+        //
+        // #[cfg(feature = "cuda")]
+        // if x.is_contiguous() && self.remove_mean {
+        //     if let Some(bias) = &self.bias {
+        //         if matches!(x.device(), candle::Device::Cuda(_))
+        //             && matches!(x.dtype(), DType::F32 | DType::F16 | DType::BF16)
+        //         {
+        //             return candle::Tensor::layer_norm_fused(
+        //                 x, &self.weight, bias, self.eps as f32,
+        //             );
+        //         }
+        //     }
+        // }
         if x.is_contiguous() && self.remove_mean {
             if let Some(bias) = self.bias.as_ref() {
                 return crate::ops::layer_norm(x, &self.weight, bias, self.eps as f32);
