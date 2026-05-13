@@ -134,12 +134,29 @@ impl Module for LayerNorm {
         //         }
         //     }
         // }
+        let x_dtype = x.dtype();
+        // Match PyTorch semantics: when `x` is reduced precision (bf16/f16) but
+        // weight/bias are stored in f32 (common when the optimiser keeps master
+        // params in f32 and only the activations are cast), cast the affine
+        // params to `x_dtype` for the final multiply/add. Without this, the
+        // `broadcast_mul`/`broadcast_add` below hit a dtype-mismatch path that
+        // silently hangs CUDA training. We cast once up-front since both the
+        // fast path and the manual fallback need matched dtypes.
+        let weight = if self.weight.dtype() != x_dtype {
+            self.weight.to_dtype(x_dtype)?
+        } else {
+            self.weight.clone()
+        };
+        let bias = match self.bias.as_ref() {
+            Some(b) if b.dtype() != x_dtype => Some(b.to_dtype(x_dtype)?),
+            Some(b) => Some(b.clone()),
+            None => None,
+        };
         if x.is_contiguous() && self.remove_mean {
-            if let Some(bias) = self.bias.as_ref() {
-                return crate::ops::layer_norm(x, &self.weight, bias, self.eps as f32);
+            if let Some(bias) = bias.as_ref() {
+                return crate::ops::layer_norm(x, &weight, bias, self.eps as f32);
             }
         }
-        let x_dtype = x.dtype();
         let internal_dtype = match x_dtype {
             DType::F16 | DType::BF16 => DType::F32,
             d => d,
@@ -154,10 +171,10 @@ impl Module for LayerNorm {
         };
         let norm_x = (x.sqr()?.sum_keepdim(D::Minus1)? / hidden_size as f64)?;
         let x_normed = x.broadcast_div(&(norm_x + self.eps)?.sqrt()?)?;
-        let x = x_normed.to_dtype(x_dtype)?.broadcast_mul(&self.weight)?;
-        match &self.bias {
+        let x = x_normed.to_dtype(x_dtype)?.broadcast_mul(&weight)?;
+        match bias {
             None => Ok(x),
-            Some(bias) => x.broadcast_add(bias),
+            Some(bias) => x.broadcast_add(&bias),
         }
     }
 }
